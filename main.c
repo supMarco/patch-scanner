@@ -124,13 +124,13 @@ int main()
 			if (pImageFileHeader->Machine == IMAGE_FILE_MACHINE_AMD64)
 			{
 				pImageOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)filePositionA;
-				pRelocStruct->relocationOffset = (DWORD64)(hModules[m] - pImageOptionalHeader64->ImageBase);
+				pRelocStruct->relocationOffset = (BYTE*)hModules[m] - pImageOptionalHeader64->ImageBase;
 				pRelocStruct->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
 			else
 			{
 				pImageOptionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)filePositionA;
-				pRelocStruct->relocationOffset = (DWORD64)(hModules[m] - pImageOptionalHeader32->ImageBase);
+				pRelocStruct->relocationOffset = (BYTE*)hModules[m] - pImageOptionalHeader32->ImageBase;
 				pRelocStruct->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
 			filePositionA = (BYTE*)filePositionA + pImageFileHeader->SizeOfOptionalHeader;
@@ -270,7 +270,7 @@ void applyRelocation(void *fileBuffer, reloc *pRelocStruct, PIMAGE_SECTION_HEADE
 {
 	void* sectionBase = NULL;
 	void* fileBase = NULL;
-	void* endOfRelocationDir = 0;
+	void* endOfRelocationDir = NULL;
 
 	fileBase = fileBuffer;
 	fileBuffer = (BYTE*)fileBuffer + virtualAddressToFileAddress(pRelocStruct->pImageRelocationDataDirectory->VirtualAddress, pImageSectionHeaders);
