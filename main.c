@@ -154,6 +154,10 @@ int main()
 			//Scan for current module's patches
 			for (int n = 0; pImageExecutableSectionHeaders[n]; n++)
 			{
+				//Skip .reloc
+				if (!strcmp((char*)pImageExecutableSectionHeaders[n]->Name, ".reloc"))
+					continue;
+
 				vmBuffer = malloc(pImageExecutableSectionHeaders[n]->SizeOfRawData);
 				if (vmBuffer)
 				{
