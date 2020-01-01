@@ -9,6 +9,7 @@
 #include <time.h>
 
 #pragma comment(lib,"shlwapi.lib") //MSVC only
+#pragma comment(lib,"ntdll.lib") //MSVC only
 
 #define MAX_SECTIONS 64
 #define MAX_MODULES 128
@@ -61,6 +62,7 @@ int main()
 	PIMAGE_OPTIONAL_HEADER64 pImageOptionalHeader64 = NULL;
 
 	//===========================================================================================
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	//Get process PID as user input
 	fprintf(stdout, "Process ID: >");
@@ -91,6 +93,11 @@ int main()
 		{
 			GetModuleFileNameEx(hProcess, hModules[m], moduleFileName+m*MAX_PATH, MAX_PATH);
 		}
+	}
+	else
+	{
+		fprintf(stdout, "Use 64bit version\r\n");
+		return 0;
 	}
 
 	//Allocate memory for each module
