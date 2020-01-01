@@ -32,7 +32,7 @@ typedef struct
 	DWORD64 relocationOffset;
 } reloc;
 
-void* loadFromFile(char* filename, char** buffer);
+DWORD loadFromFile(char* filename, char** buffer);
 void applyRelocation(void* fileBuffer, reloc* pRelocStruct, PIMAGE_SECTION_HEADER* pImageExecutableSectionHeaders);
 DWORD64 virtualAddressToFileAddress(DWORD64 virtualAddress, PIMAGE_SECTION_HEADER* pImageSectionHeaders);
 void printScanResult(patch** patches);
@@ -80,10 +80,10 @@ int main()
 	if (!hProcess) return 0;
 
 	//Allocate some buffers and zero-out the allocated memory (calloc)
-	moduleFileName = calloc(MAX_MODULES+1, MAX_PATH); //char moduleFileName[MAX_MODULES][MAX_PATH] = { 0 };
-	pImageExecutableSectionHeaders = calloc(MAX_SECTIONS+1, sizeof(PIMAGE_SECTION_HEADER)); //PIMAGE_SECTION_HEADER pImageExecutableSectionHeaders[MAX_SECTIONS] = { NULL };
-	patches = calloc(MAX_PATCHES+1, sizeof(patch*)); //patch *patches[MAX_PATCHES] = { NULL };
-	pRelocStruct = calloc(1, sizeof(reloc));
+	moduleFileName = (char*)calloc(MAX_MODULES + 1, MAX_PATH); //char moduleFileName[MAX_MODULES][MAX_PATH] = { 0 };
+	pImageExecutableSectionHeaders = (PIMAGE_SECTION_HEADER*)calloc(MAX_SECTIONS + 1, sizeof(PIMAGE_SECTION_HEADER)); //PIMAGE_SECTION_HEADER pImageExecutableSectionHeaders[MAX_SECTIONS] = { NULL };
+	patches = (patch**)calloc(MAX_PATCHES + 1, sizeof(patch*)); //patch *patches[MAX_PATCHES] = { NULL };
+	pRelocStruct = (reloc*)calloc(1, sizeof(reloc));
 
 	//Collect process modules and paths
 	DWORD cbNeeded = 0;
@@ -101,47 +101,47 @@ int main()
 	}
 
 	//Allocate memory for each module
-	fileBuffer = calloc((cbNeeded / sizeof(HMODULE))+1, sizeof(void *)); //void * fileBuffer[PROCESS_MODULES_COUNT] = { NULL };
+	fileBuffer = (void**)calloc((cbNeeded / sizeof(HMODULE)) + 1, sizeof(void*)); //void * fileBuffer[PROCESS_MODULES_COUNT] = { NULL };
 
 	//Load modules (files)
 	for (int m = 0; hModules[m]; m++)
 	{
-		loadFromFile(moduleFileName+m*MAX_PATH, fileBuffer+m);
+		loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m));
 	}
 
 	for (int m = 0; fileBuffer[m]; m++)
 	{
 		filePositionA = fileBuffer[m];
-		pImageDosHeader = filePositionA;
+		pImageDosHeader = (PIMAGE_DOS_HEADER)filePositionA;
 
 		//Make sure it's a PE
 		if (pImageDosHeader->e_magic == IMAGE_DOS_SIGNATURE)
 		{
 			//Gather needed PE info
 			filePositionA = (BYTE*)filePositionA + pImageDosHeader->e_lfanew + sizeof(DWORD32);
-			pImageFileHeader = filePositionA;
+			pImageFileHeader = (PIMAGE_FILE_HEADER)filePositionA;
 			filePositionA = (BYTE*)filePositionA + sizeof(IMAGE_FILE_HEADER);
 			if (pImageFileHeader->Machine == IMAGE_FILE_MACHINE_AMD64)
 			{
-				pImageOptionalHeader64 = filePositionA;
-				pRelocStruct->relocationOffset = (BYTE*)hModules[m] - pImageOptionalHeader64->ImageBase;
-				pRelocStruct->pImageRelocationDataDirectory = ((BYTE*)filePositionA + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5;
+				pImageOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)filePositionA;
+				pRelocStruct->relocationOffset = (DWORD64)(hModules[m] - pImageOptionalHeader64->ImageBase);
+				pRelocStruct->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
 			else
 			{
-				pImageOptionalHeader32 = filePositionA;
-				pRelocStruct->relocationOffset = (BYTE*)hModules[m] - pImageOptionalHeader32->ImageBase;
-				pRelocStruct->pImageRelocationDataDirectory = ((BYTE*)filePositionA + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5;
+				pImageOptionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)filePositionA;
+				pRelocStruct->relocationOffset = (DWORD64)(hModules[m] - pImageOptionalHeader32->ImageBase);
+				pRelocStruct->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
 			filePositionA = (BYTE*)filePositionA + pImageFileHeader->SizeOfOptionalHeader;
 
 			//Filter executable sections (& .reloc)
 			for (int i = 0, j = 0; i < pImageFileHeader->NumberOfSections; i++, filePositionA = (BYTE*)filePositionA + sizeof(IMAGE_SECTION_HEADER))
 			{
-				pImageSectionHeader = filePositionA;
-				if ((pImageSectionHeader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp(pImageSectionHeader->Name, ".reloc"))
+				pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePositionA;
+				if ((pImageSectionHeader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp((char*)pImageSectionHeader->Name, ".reloc"))
 				{
-					pImageExecutableSectionHeaders[j++] = filePositionA;
+					pImageExecutableSectionHeaders[j++] = (PIMAGE_SECTION_HEADER)filePositionA;
 				}
 			}
 
@@ -157,7 +157,11 @@ int main()
 				vmBuffer = malloc(pImageExecutableSectionHeaders[n]->SizeOfRawData);
 				if (vmBuffer)
 				{
-					size_t byteRead = 0;
+#ifdef _WIN64
+					long long unsigned int byteRead = 0;
+#else
+					long unsigned int byteRead = 0;
+#endif
 					size_t position = 0;
 					ReadProcessMemory(hProcess, (BYTE*)hModules[m] + pImageExecutableSectionHeaders[n]->VirtualAddress, vmBuffer, pImageExecutableSectionHeaders[n]->SizeOfRawData, &byteRead);
 					filePositionB = (BYTE*)fileBuffer[m] + pImageExecutableSectionHeaders[n]->PointerToRawData;
@@ -167,7 +171,7 @@ int main()
 					for (int l = patchesCount, k = 0; (position < pImageExecutableSectionHeaders[n]->SizeOfRawData) && l < MAX_PATCHES; l++)
 					{
 						//Allocate a patch struct and fill it
-						patches[l] = malloc(sizeof(patch));
+						patches[l] = (patch*)malloc(sizeof(patch));
 						patches[l]->patchedBytesCount = 0;
 
 						strcpy(patches[l]->moduleName, moduleFileName+m*MAX_PATH);
@@ -234,7 +238,7 @@ int main()
 	return 0;
 }
 
-void* loadFromFile(char* filename, char** buffer)
+DWORD loadFromFile(char* filename, char** buffer)
 {
 	HANDLE hFile = NULL;
 	DWORD bufferSize = 0;
@@ -262,7 +266,7 @@ void applyRelocation(void *fileBuffer, reloc *pRelocStruct, PIMAGE_SECTION_HEADE
 {
 	void* sectionBase = NULL;
 	void* fileBase = NULL;
-	DWORD64 endOfRelocationDir = 0;
+	void* endOfRelocationDir = 0;
 
 	fileBase = fileBuffer;
 	fileBuffer = (BYTE*)fileBuffer + virtualAddressToFileAddress(pRelocStruct->pImageRelocationDataDirectory->VirtualAddress, pImageSectionHeaders);
@@ -270,10 +274,10 @@ void applyRelocation(void *fileBuffer, reloc *pRelocStruct, PIMAGE_SECTION_HEADE
 
 	while (fileBuffer < endOfRelocationDir)
 	{
-		pRelocStruct->pImageBaseRelocation = fileBuffer;
+		pRelocStruct->pImageBaseRelocation = (PIMAGE_BASE_RELOCATION)fileBuffer;
 		size_t relocationItems = (pRelocStruct->pImageBaseRelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD); //To determine the number of relocations in this block, subtract the size of an IMAGE_BASE_RELOCATION (8 bytes) from the value of this field, and then divide by 2 (the size of a WORD)
 		fileBuffer = (BYTE*)fileBuffer + sizeof(IMAGE_BASE_RELOCATION);
-		if (sectionBase = virtualAddressToFileAddress(pRelocStruct->pImageBaseRelocation->VirtualAddress, pImageSectionHeaders)) 
+		if (sectionBase = (void*)virtualAddressToFileAddress(pRelocStruct->pImageBaseRelocation->VirtualAddress, pImageSectionHeaders))
 			sectionBase = (BYTE*)sectionBase + (DWORD64)fileBase;
 
 		for (int i = 0; i < relocationItems; i++)
