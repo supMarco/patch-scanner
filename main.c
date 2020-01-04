@@ -505,7 +505,7 @@ int main()
 						//Set progressbar range and increment
 #ifdef GUI
 						SendMessage(hwndScanProgressBar01, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-						SendMessage(hwndScanProgressBar02, PBM_SETSTEP, (WPARAM)1, 0);
+						SendMessage(hwndScanProgressBar01, PBM_SETSTEP, (WPARAM)1, 0);
 						SendMessage(hwndScanProgressBar01, PBM_SETPOS, 0, 0);
 #endif
 
