@@ -9,29 +9,32 @@
 #include <stdio.h>
 #include <time.h>
 
+#define GUI //Comment this out for the console version
+
+#ifdef GUI
 #include <tlhelp32.h>
 #include <commctrl.h>
 #include <stdlib.h>
+#endif
 
-//-lntdll -lshlwapi -lcomctl32 -mwindows
+//CONSOLE:  -lntdll -lshlwapi
+//GUI:      -lntdll -lshlwapi -lcomctl32 -mwindows
 
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
-#pragma comment(lib,"ntdll.lib")
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_MODULES 128
 #define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //#16 -> "?? " + #1 -> "+\0" (worst case)
 
-#define GUI
-
 #ifdef GUI
 #define MAX_PROCESSES 512
-
 #define ID_SCAN_BUTTON 1001
 #define ID_PROCESS_LIST 2001
 #define ID_PATCH_LIST 2002
-#define ID_PROGRESS_BAR 3003
+#define ID_PROGRESS_BAR_01 3001
+#define ID_PROGRESS_BAR_02 3002
+#define ID_MENU_PROCESS_LIST_REFRESH 4001
 #endif
 
 //Structs & Lists
@@ -63,7 +66,7 @@ typedef struct
 {
 	char name[MAX_PATH];
 	DWORD pid;
-}WIN_PROCESS;
+} WIN_PROCESS;
 #endif
 
 int busy = 0;
@@ -83,6 +86,7 @@ void printPatchList(PATCH_LIST* patches);
 LRESULT CALLBACK WindowProc(HWND, UINT, WPARAM, LPARAM);
 void onWindowCreate(HWND);
 void onScanButtonClick();
+void onMenuItemRefreshClick();
 void updateProcessList(WIN_PROCESS* processes);
 void updatePatchList(PATCH_LIST* patches);
 void getProcesses(WIN_PROCESS* processes);
@@ -91,7 +95,8 @@ HWND hwndMain = NULL;
 HWND hwndScanButton = NULL;
 HWND hwndProcessList = NULL;
 HWND hwndPatchList = NULL;
-HWND hwndScanProgressBar = NULL;
+HWND hwndScanProgressBar01 = NULL;
+HWND hwndScanProgressBar02 = NULL;
 HFONT hFont = NULL;
 
 WIN_PROCESS processes[MAX_PROCESSES];
@@ -165,6 +170,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case ID_SCAN_BUTTON:
 			onScanButtonClick();
 			return 0;
+		case ID_MENU_PROCESS_LIST_REFRESH:
+			onMenuItemRefreshClick();
+			return 0;
+		}
+	case WM_NOTIFY:
+		switch (wParam)
+		{
+		case ID_PROCESS_LIST:
+			if (((NMHDR*)lParam)->code == NM_RCLICK)
+			{
+				POINT p;
+				if (GetCursorPos(&p))
+				{
+					HMENU hPopupMenu = CreatePopupMenu();
+					InsertMenu(hPopupMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_PROCESS_LIST_REFRESH, "Refresh");
+					SetForegroundWindow(hwndMain);
+					TrackPopupMenu(hPopupMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hwndMain, NULL);
+				}
+			}
+			return 0;
 		}
 	}
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
@@ -173,15 +198,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 void onWindowCreate(HWND hwnd)
 {
 	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
-	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 275, 350, 30, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
+	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 275, 350, 32, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
 	hwndProcessList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 250, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
 	hwndPatchList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 15, 700, 250, hwnd, (HMENU)ID_PATCH_LIST, NULL, NULL);
-	hwndScanProgressBar = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 276, 700, 28, hwnd, (HMENU)ID_PROGRESS_BAR, NULL, NULL);
+	hwndScanProgressBar01 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 276, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_01, NULL, NULL);
+	hwndScanProgressBar02 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 292, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_02, NULL, NULL);
+
 	//Set Font
 	hFont = CreateFont(19, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, TEXT("Segoe UI"));
 	SendMessage(hwndScanButton, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
 	SendMessage(hwndProcessList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
 	SendMessage(hwndPatchList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+
 	//Init Lists
 	LVCOLUMN lvc;
 	lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
@@ -222,8 +250,13 @@ void onScanButtonClick()
 	}
 	else
 	{
-		MessageBoxA(hwndMain, "Scan in progress", NULL, MB_ICONEXCLAMATION);
+		MessageBoxA(hwndMain, "Scan in progress...", NULL, MB_ICONEXCLAMATION);
 	}
+}
+
+void onMenuItemRefreshClick()
+{
+	updateProcessList(processes);
 }
 
 void updatePatchList(PATCH_LIST* patches)
@@ -321,8 +354,7 @@ int main()
 	DWORD PID = 0;
 	unsigned long int patchesCount = 0;
 	unsigned long int modulesCount = 0;
-	void* filePositionA = NULL;
-	void* filePositionB = NULL;
+	void* filePosition = NULL;
 	PIMAGE_DOS_HEADER pImageDosHeader = NULL;
 	PIMAGE_FILE_HEADER pImageFileHeader = NULL;
 	PIMAGE_SECTION_HEADER pImageSectionHeader = NULL;
@@ -392,47 +424,48 @@ int main()
 		loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m));
 	}
 
-	//Set progressbar range and increment
+	//Set progressbar range and increment + empty patch listview
 #ifdef GUI
-	SendMessage(hwndScanProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, modulesCount));
-	SendMessage(hwndScanProgressBar, PBM_SETSTEP, (WPARAM)1, 0);
-	SendMessage(hwndScanProgressBar, PBM_SETPOS, 0, 0);
+	SendMessage(hwndScanProgressBar02, PBM_SETRANGE, 0, MAKELPARAM(0, modulesCount));
+	SendMessage(hwndScanProgressBar02, PBM_SETSTEP, (WPARAM)1, 0);
+	SendMessage(hwndScanProgressBar02, PBM_SETPOS, 0, 0);
+	ListView_DeleteAllItems(hwndPatchList);
 #endif
 
 	for (int m = 0; fileBuffer[m]; m++)
 	{
-		filePositionA = fileBuffer[m];
-		pImageDosHeader = (PIMAGE_DOS_HEADER)filePositionA;
+		filePosition = fileBuffer[m];
+		pImageDosHeader = (PIMAGE_DOS_HEADER)filePosition;
 
 		//Make sure it's a PE
 		if (pImageDosHeader->e_magic == IMAGE_DOS_SIGNATURE)
 		{
 			//Gather needed PE info
-			filePositionA = (BYTE*)filePositionA + pImageDosHeader->e_lfanew + sizeof(DWORD32);
-			pImageFileHeader = (PIMAGE_FILE_HEADER)filePositionA;
-			filePositionA = (BYTE*)filePositionA + sizeof(IMAGE_FILE_HEADER);
+			filePosition = (BYTE*)filePosition + pImageDosHeader->e_lfanew + sizeof(DWORD32);
+			pImageFileHeader = (PIMAGE_FILE_HEADER)filePosition;
+			filePosition = (BYTE*)filePosition + sizeof(IMAGE_FILE_HEADER);
 			if (pImageFileHeader->Machine == IMAGE_FILE_MACHINE_AMD64)
 			{
-				pImageOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)filePositionA;
+				pImageOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)filePosition;
 				pReloc->relocationOffset = (DWORD64)((BYTE*)hModules[m] - pImageOptionalHeader64->ImageBase);
-				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
+				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePosition + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
 			else
 			{
-				pImageOptionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)filePositionA;
+				pImageOptionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)filePosition;
 				pReloc->relocationOffset = (DWORD64)((BYTE*)hModules[m] - pImageOptionalHeader32->ImageBase);
-				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePositionA + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
+				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePosition + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
 			}
-			filePositionA = (BYTE*)filePositionA + pImageFileHeader->SizeOfOptionalHeader;
+			filePosition = (BYTE*)filePosition + pImageFileHeader->SizeOfOptionalHeader;
 
 			//Filter executable sections (& .reloc)
-			for (int i = 0; i < pImageFileHeader->NumberOfSections; i++, filePositionA = (BYTE*)filePositionA + sizeof(IMAGE_SECTION_HEADER))
+			for (int i = 0; i < pImageFileHeader->NumberOfSections; i++, filePosition = (BYTE*)filePosition + sizeof(IMAGE_SECTION_HEADER))
 			{
-				pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePositionA;
+				pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePosition;
 				if ((pImageSectionHeader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp((char*)pImageSectionHeader->Name, ".reloc"))
 				{
 					SECTION_HEADER_LIST* node = (SECTION_HEADER_LIST*)calloc(1, sizeof(SECTION_HEADER_LIST));
-					node->pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePositionA;
+					node->pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePosition;
 					node->next = NULL;
 					sectionHeaderListAddLast(&executableAndRelocSectionHeaders, node);
 				}
@@ -460,14 +493,21 @@ int main()
 #else
 					long unsigned int byteRead = 0;
 #endif
-					size_t position = 0;
+					long unsigned int position = 0;
 					ReadProcessMemory(hProcess, (BYTE*)hModules[m] + sectionHeaders->pImageSectionHeader->VirtualAddress, vmBuffer, sectionHeaders->pImageSectionHeader->SizeOfRawData, &byteRead);
 
 					//Verify ReadProcessMemory success
 					if (byteRead)
 					{
-						filePositionB = (BYTE*)fileBuffer[m] + sectionHeaders->pImageSectionHeader->PointerToRawData;
-						position += RtlCompareMemory(vmBuffer, filePositionB, sectionHeaders->pImageSectionHeader->SizeOfRawData);
+						filePosition = (BYTE*)fileBuffer[m] + sectionHeaders->pImageSectionHeader->PointerToRawData;
+						position += RtlCompareMemory(vmBuffer, filePosition, sectionHeaders->pImageSectionHeader->SizeOfRawData);
+
+						//Set progressbar range and increment
+#ifdef GUI
+						SendMessage(hwndScanProgressBar01, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+						SendMessage(hwndScanProgressBar02, PBM_SETSTEP, (WPARAM)1, 0);
+						SendMessage(hwndScanProgressBar01, PBM_SETPOS, 0, 0);
+#endif
 
 						//For each patch found a node is allocated, filled with the needed info and added to the patch list
 						int k = 0;
@@ -482,11 +522,11 @@ int main()
 							PathStripPathA(node->moduleName);
 							node->patchedBytesOffset = position;
 
-							while ((position <= sectionHeaders->pImageSectionHeader->SizeOfRawData) && (*((BYTE*)(vmBuffer)+position) != *((BYTE*)(filePositionB)+position)))
+							while ((position <= sectionHeaders->pImageSectionHeader->SizeOfRawData) && (*((BYTE*)(vmBuffer)+position) != *((BYTE*)(filePosition)+position)))
 							{
 								if ((k + 1) * 3 < MAX_SHOWN_PATCH_SIZE && k != -1)
 								{
-									snprintf(node->originalBytes + k * 3, 4, "%.2X ", *((BYTE*)filePositionB + node->patchedBytesOffset + k));
+									snprintf(node->originalBytes + k * 3, 4, "%.2X ", *((BYTE*)filePosition + node->patchedBytesOffset + k));
 									snprintf(node->patchedBytes + k * 3, 4, "%.2X ", *((BYTE*)vmBuffer + node->patchedBytesOffset + k));
 									k++;
 								}
@@ -504,10 +544,16 @@ int main()
 							//Add node
 							patchListAddLast(&patches, node);
 
-							position += RtlCompareMemory((BYTE*)vmBuffer + position, (BYTE*)filePositionB + position, sectionHeaders->pImageSectionHeader->SizeOfRawData);
+							position += RtlCompareMemory((BYTE*)vmBuffer + position, (BYTE*)filePosition + position, sectionHeaders->pImageSectionHeader->SizeOfRawData);
 							patchesCount++;
 							k = 0;
+#ifdef GUI
+							SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionHeaders->pImageSectionHeader->SizeOfRawData), 0);
+#endif
 						}
+#ifdef GUI
+						SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionHeaders->pImageSectionHeader->SizeOfRawData), 0);
+#endif
 					}
 					free(vmBuffer);
 					vmBuffer = NULL;
@@ -521,7 +567,7 @@ int main()
 
 		//Progressbar step
 #ifdef GUI
-		SendMessage(hwndScanProgressBar, PBM_STEPIT, 0, 0);
+		SendMessage(hwndScanProgressBar02, PBM_STEPIT, 0, 0);
 #endif
 	}
 
