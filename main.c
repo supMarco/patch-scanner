@@ -13,12 +13,11 @@
 #include <commctrl.h>
 #include <stdlib.h>
 
-/*-lntdll -lshlwapi -lgdi32 -mwindows*/
+//-lntdll -lshlwapi -lcomctl32 -mwindows
 
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
 #pragma comment(lib,"ntdll.lib")
-#pragma comment(lib,"gdi32.lib")
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_MODULES 128
