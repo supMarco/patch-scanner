@@ -4,17 +4,33 @@
 
 #include <windows.h>
 #include <shlwapi.h>
+#include <process.h>
 #include <psapi.h>
 #include <stdio.h>
 #include <time.h>
 
-#pragma comment(lib,"shlwapi.lib") //MSVC only
-#pragma comment(lib,"ntdll.lib") //MSVC only
+#include <tlhelp32.h>
+#include <commctrl.h>
+#include <stdlib.h>
+
+//MSVC only
+#pragma comment(lib,"shlwapi.lib")
+#pragma comment(lib,"ntdll.lib")
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_MODULES 128
 #define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //#16 -> "?? " + #1 -> "+\0" (worst case)
 
-//#define GUI
+#define GUI
+
+#ifdef GUI
+#define MAX_PROCESSES 512
+
+#define ID_SCAN_BUTTON 1001
+#define ID_PROCESS_LIST 2001
+#define ID_PATCH_LIST 2002
+#define ID_PROGRESS_BAR 3003
+#endif
 
 //Structs & Lists
 typedef struct patch_list
@@ -40,7 +56,18 @@ typedef struct
 	DWORD64 relocationOffset;
 } RELOC;
 
+#ifdef GUI
+typedef struct 
+{
+	char name[MAX_PATH];
+	DWORD pid;
+}WIN_PROCESS;
+#endif
+
+int busy = 0;
+
 //Prototypes
+int main();
 DWORD loadFromFile(char* filename, char** buffer);
 DWORD64 virtualAddressToFileAddress(DWORD64 virtualAddress, SECTION_HEADER_LIST* sectionHeaders);
 void applyRelocation(void* fileBuffer, RELOC* pReloc, SECTION_HEADER_LIST* sectionHeaders);
@@ -49,6 +76,233 @@ void patchListAddLast(PATCH_LIST** pPatches, PATCH_LIST* node);
 void sectionHeaderListFree(SECTION_HEADER_LIST** pSectionHeaders);
 void patchListFree(PATCH_LIST** pPatches);
 void printPatchList(PATCH_LIST* patches);
+
+#ifdef GUI
+LRESULT CALLBACK WindowProc(HWND, UINT, WPARAM, LPARAM);
+void onWindowCreate(HWND);
+void onScanButtonClick();
+void updateProcessList(WIN_PROCESS* processes);
+void updatePatchList(PATCH_LIST* patches);
+void getProcesses(WIN_PROCESS* processes);
+
+HWND hwndMain = NULL;
+HWND hwndScanButton = NULL;
+HWND hwndProcessList = NULL;
+HWND hwndPatchList = NULL;
+HWND hwndScanProgressBar = NULL;
+HFONT hFont = NULL;
+
+WIN_PROCESS processes[MAX_PROCESSES];
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nCmdShow)
+{
+	BYTE className[] = "mainWindowClass";
+	MSG msg;
+
+	WNDCLASS wndClass = { 0 };
+	wndClass.hInstance = hInst;
+	wndClass.lpszClassName = className;
+	wndClass.lpfnWndProc = WindowProc;
+	wndClass.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_3DFACE);
+	wndClass.style = CS_HREDRAW | CS_VREDRAW;
+	wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+
+	RegisterClass(&wndClass);
+
+	/*
+	[CreateWindow]:
+	lpClassName
+	lpWindowName
+	dwStyle
+	x
+	y
+	nWidth
+	nHeight
+	hWndParent
+	hMenu
+	hInstance
+	lpParam
+	*/
+	hwndMain = CreateWindow(className,
+		"Patch Scanner",
+		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+		CW_USEDEFAULT,
+		CW_USEDEFAULT,
+		1112,
+		360,
+		NULL,
+		NULL,
+		hInst,
+		NULL);
+
+	if (hwndMain)
+	{
+		ShowWindow(hwndMain, nCmdShow);
+		while (GetMessage(&msg, NULL, 0, 0))
+		{
+			TranslateMessage(&msg);
+			DispatchMessageW(&msg);
+		}
+	}
+	return 0;
+}
+
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	switch (uMsg)
+	{
+	case WM_CREATE:
+		onWindowCreate(hwnd);
+		return 0;
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		return 0;
+	case WM_COMMAND:
+		switch (LOWORD(wParam))
+		{
+		case ID_SCAN_BUTTON:
+			onScanButtonClick();
+			return 0;
+		}
+	}
+	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+void onWindowCreate(HWND hwnd)
+{
+	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
+	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 275, 350, 30, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
+	hwndProcessList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 250, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
+	hwndPatchList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 15, 700, 250, hwnd, (HMENU)ID_PATCH_LIST, NULL, NULL);
+	hwndScanProgressBar = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 276, 700, 28, hwnd, (HMENU)ID_PROGRESS_BAR, NULL, NULL);
+	//Set Font
+	hFont = CreateFont(19, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, TEXT("Segoe UI"));
+	SendMessage(hwndScanButton, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+	SendMessage(hwndProcessList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+	SendMessage(hwndPatchList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+	//Init Lists
+	LVCOLUMN lvc;
+	lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+	//Process list
+	lvc.iSubItem = 1;
+	lvc.pszText = "Process name";
+	lvc.cx = 300;
+	ListView_InsertColumn(hwndProcessList, 0, &lvc);
+	lvc.iSubItem = 0;
+	lvc.pszText = "PID";
+	lvc.cx = 100;
+	ListView_InsertColumn(hwndProcessList, 0, &lvc);
+	//Patch list
+	lvc.iSubItem = 2;
+	lvc.pszText = "Patched bytes";
+	lvc.cx = 300;
+	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	lvc.iSubItem = 1;
+	lvc.pszText = "Original bytes";
+	lvc.cx = 300;
+	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	lvc.iSubItem = 0;
+	lvc.pszText = "Address";
+	lvc.cx = 180;
+	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+
+	ListView_SetExtendedListViewStyle(hwndProcessList, LVS_EX_FULLROWSELECT);
+	ListView_SetExtendedListViewStyle(hwndPatchList, LVS_EX_FULLROWSELECT);
+
+	updateProcessList(processes);
+}
+
+void onScanButtonClick()
+{
+	if (!busy)
+	{
+		_beginthread(main, 0, NULL);
+	}
+	else
+	{
+		MessageBoxA(hwndMain, "Scan in progress", NULL, MB_ICONEXCLAMATION);
+	}
+}
+
+void updatePatchList(PATCH_LIST* patches)
+{
+	char temp[32] = { 0 };
+	LVITEM lvi;
+	lvi.mask = LVIF_TEXT;
+
+	ListView_DeleteAllItems(hwndPatchList);
+
+	for (int i = 0; patches; i++)
+	{
+		_itoa(patches->patchedBytesOffset, temp, 16);
+		_strupr(temp);
+		strcat(patches->moduleName, "+");
+		strcat(patches->moduleName, temp);
+
+		lvi.iItem = i;
+		lvi.iSubItem = 0;
+		lvi.pszText = patches->moduleName;
+		ListView_InsertItem(hwndPatchList, &lvi);
+		lvi.iSubItem = 1;
+		lvi.pszText = patches->originalBytes;
+		ListView_SetItem(hwndPatchList, &lvi);
+		lvi.iSubItem = 2;
+		lvi.pszText = patches->patchedBytes;
+		ListView_SetItem(hwndPatchList, &lvi);
+
+		patches = patches->next;
+	}
+}
+
+void updateProcessList(WIN_PROCESS* processes)
+{
+	LVITEM lvi;
+	DWORD currPos = 0;
+	BYTE pid[MAX_PATH] = { 0 };
+
+	currPos = ListView_GetNextItem(hwndProcessList, -1, LVNI_SELECTED);
+
+	lvi.mask = LVIF_TEXT;
+
+	RtlZeroMemory(processes, sizeof(WIN_PROCESS) * MAX_PROCESSES);
+	ListView_DeleteAllItems(hwndProcessList);
+
+	getProcesses(processes);
+
+	for (int i = 0; processes[i].pid | !i; i++)
+	{
+		lvi.iItem = i;
+		lvi.iSubItem = 0;
+		_itoa(processes[i].pid, pid, 10);
+		lvi.pszText = pid;
+		ListView_InsertItem(hwndProcessList, &lvi);
+		lvi.iSubItem = 1;
+		lvi.pszText = processes[i].name;
+		ListView_SetItem(hwndProcessList, &lvi);
+	}
+	ListView_EnsureVisible(hwndProcessList, currPos, TRUE);
+}
+
+void getProcesses(WIN_PROCESS* processes)
+{
+	HANDLE hProcess = NULL;
+	PROCESSENTRY32 processEntry;
+	processEntry.dwSize = sizeof(PROCESSENTRY32);
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+
+	if (hSnapshot != INVALID_HANDLE_VALUE && Process32First(hSnapshot, &processEntry))
+	{
+		int i = 0;
+		do
+		{
+			strcpy(processes[i].name, processEntry.szExeFile);
+			processes[i].pid = processEntry.th32ProcessID;
+			i++;
+		} while (Process32Next(hSnapshot, &processEntry));
+	}
+	CloseHandle(hSnapshot);
+}
+#endif
 
 int main()
 {
@@ -63,7 +317,8 @@ int main()
 	//Stack
 	HMODULE hModules[512] = { NULL };
 	DWORD PID = 0;
-	size_t patchesCount = 0;
+	unsigned long int patchesCount = 0;
+	unsigned long int modulesCount = 0;
 	void* filePositionA = NULL;
 	void* filePositionB = NULL;
 	PIMAGE_DOS_HEADER pImageDosHeader = NULL;
@@ -72,7 +327,10 @@ int main()
 	PIMAGE_OPTIONAL_HEADER32 pImageOptionalHeader32 = NULL;
 	PIMAGE_OPTIONAL_HEADER64 pImageOptionalHeader64 = NULL;
 
+	busy = 1;
 
+	//Collect input
+#ifndef GUI
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	//Get process PID as user input
@@ -81,6 +339,11 @@ int main()
 
 	//Clear shell
 	system("@cls||clear");
+#else
+	char temp[16] = { 0 };
+	ListView_GetItemText(hwndProcessList, ListView_GetNextItem(hwndProcessList, -1, LVNI_SELECTED), 0, temp, 16);
+	PID = _atoi64(temp);
+#endif
 
 	//Execution time
 	clock_t start = clock(), stop = 0;
@@ -88,7 +351,11 @@ int main()
 	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, PID);
 
 	//Verify OpenProcess success
-	if (!hProcess) return 0;
+	if (!hProcess)
+	{
+		busy = 0;
+		return 0;
+	}
 
 	//Allocate some buffers and zero-out the allocated memory (calloc)
 	moduleFileName = (char*)calloc(MAX_MODULES + 1, MAX_PATH); //char moduleFileName[MAX_MODULES][MAX_PATH] = { 0 };
@@ -104,7 +371,12 @@ int main()
 	}
 	else
 	{
+#ifndef GUI
 		fprintf(stdout, "Use 64bit version\r\n");
+#else
+		MessageBoxA(NULL, "Use 64bit version", "Error", MB_ICONERROR);
+#endif
+		busy = 0;
 		return 0;
 	}
 
@@ -113,10 +385,17 @@ int main()
 	pReloc = (RELOC*)calloc(1, sizeof(RELOC));
 
 	//Load modules (files)
-	for (int m = 0; hModules[m]; m++)
+	for (int m = 0; hModules[m]; m++, modulesCount++)
 	{
 		loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m));
 	}
+
+	//Set progressbar range and increment
+#ifdef GUI
+	SendMessage(hwndScanProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, modulesCount));
+	SendMessage(hwndScanProgressBar, PBM_SETSTEP, (WPARAM)1, 0);
+	SendMessage(hwndScanProgressBar, PBM_SETPOS, 0, 0);
+#endif
 
 	for (int m = 0; fileBuffer[m]; m++)
 	{
@@ -237,10 +516,19 @@ int main()
 		free(fileBuffer[m]);
 		fileBuffer[m] = NULL;
 		hModules[m] = NULL;
+
+		//Progressbar step
+#ifdef GUI
+		SendMessage(hwndScanProgressBar, PBM_STEPIT, 0, 0);
+#endif
 	}
 
+#ifndef GUI
 	//Print results
 	printPatchList(patches);
+#else
+	updatePatchList(patches);
+#endif
 
 	//Free list
 	patchListFree(&patches);
@@ -250,8 +538,13 @@ int main()
 
 	//Show execution time
 	stop = clock();
-	fprintf(stdout, "\n\n(Execution time: %f seconds)\n", (double)(stop - start) / CLOCKS_PER_SEC);
 
+#ifndef GUI
+	fprintf(stdout, "\n\n(Execution time: %f seconds)\n", (double)(stop - start) / CLOCKS_PER_SEC);
+#else
+	//not now
+#endif
+	busy = 0;
 	return 0;
 }
 
