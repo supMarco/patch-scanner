@@ -13,9 +13,12 @@
 #include <commctrl.h>
 #include <stdlib.h>
 
+/*-lntdll -lshlwapi -lgdi32 -mwindows*/
+
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
 #pragma comment(lib,"ntdll.lib")
+#pragma comment(lib,"gdi32.lib")
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define MAX_MODULES 128
@@ -101,7 +104,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nC
 
 	WNDCLASS wndClass = { 0 };
 	wndClass.hInstance = hInst;
-	wndClass.lpszClassName = className;
+	wndClass.lpszClassName = (LPCSTR)className;
 	wndClass.lpfnWndProc = WindowProc;
 	wndClass.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_3DFACE);
 	wndClass.style = CS_HREDRAW | CS_VREDRAW;
@@ -123,7 +126,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nC
 	hInstance
 	lpParam
 	*/
-	hwndMain = CreateWindow(className,
+	hwndMain = CreateWindow((LPCSTR)className,
 		"Patch Scanner",
 		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
 		CW_USEDEFAULT,
@@ -216,7 +219,7 @@ void onScanButtonClick()
 {
 	if (!busy)
 	{
-		_beginthread(main, 0, NULL);
+		_beginthread((_beginthread_proc_type)main, 0, NULL);
 	}
 	else
 	{
@@ -258,7 +261,7 @@ void updateProcessList(WIN_PROCESS* processes)
 {
 	LVITEM lvi;
 	DWORD currPos = 0;
-	BYTE pid[MAX_PATH] = { 0 };
+	char pid[MAX_PATH] = { 0 };
 
 	currPos = ListView_GetNextItem(hwndProcessList, -1, LVNI_SELECTED);
 
@@ -288,7 +291,7 @@ void getProcesses(WIN_PROCESS* processes)
 	HANDLE hProcess = NULL;
 	PROCESSENTRY32 processEntry;
 	processEntry.dwSize = sizeof(PROCESSENTRY32);
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 
 	if (hSnapshot != INVALID_HANDLE_VALUE && Process32First(hSnapshot, &processEntry))
 	{
@@ -429,7 +432,7 @@ int main()
 				pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePositionA;
 				if ((pImageSectionHeader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp((char*)pImageSectionHeader->Name, ".reloc"))
 				{
-					SECTION_HEADER_LIST* node = calloc(1, sizeof(SECTION_HEADER_LIST));
+					SECTION_HEADER_LIST* node = (SECTION_HEADER_LIST*)calloc(1, sizeof(SECTION_HEADER_LIST));
 					node->pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePositionA;
 					node->next = NULL;
 					sectionHeaderListAddLast(&executableAndRelocSectionHeaders, node);
@@ -472,7 +475,7 @@ int main()
 						while (position < sectionHeaders->pImageSectionHeader->SizeOfRawData)
 						{
 							//Allocate node
-							PATCH_LIST* node = calloc(1, sizeof(PATCH_LIST));
+							PATCH_LIST* node = (PATCH_LIST*)calloc(1, sizeof(PATCH_LIST));
 							//Fill node
 							node->patchedBytesCount = 0;
 							strcpy(node->moduleName, moduleFileName + m * MAX_PATH);
