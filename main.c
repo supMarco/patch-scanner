@@ -21,8 +21,9 @@
 #include <stdlib.h>
 #endif
 
+/*GCC & G++*/
 //CONSOLE:  -lntdll -lshlwapi
-//GUI:      -lntdll -lshlwapi -lcomctl32 -mwindows
+//GUI:      -lntdll -lshlwapi -lcomctl32 -mwindows & ShowWindow(hwndMain, 5)
 
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
@@ -147,7 +148,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nC
 		NULL);
 
 	if (hwndMain)
-	{
+	{ 
 		ShowWindow(hwndMain, nCmdShow);
 		while (GetMessage(&msg, NULL, 0, 0))
 		{
