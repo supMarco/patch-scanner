@@ -2,6 +2,10 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
+#ifdef UNICODE
+#undef UNICODE
+#endif
+
 #include <windows.h>
 #include <shlwapi.h>
 #include <process.h>
