@@ -14,6 +14,7 @@
 #include <time.h>
 
 #define GUI //Comment this out for the console version
+#define GCC_GPP //Comment this out for MSVC
 
 #ifdef GUI
 #include <tlhelp32.h>
@@ -21,13 +22,16 @@
 #include <stdlib.h>
 #endif
 
-/*GCC & G++*/
-//CONSOLE:  -lntdll -lshlwapi
-//GUI:      -lntdll -lshlwapi -lcomctl32 -mwindows & ShowWindow(hwndMain, 5)
-
+#ifndef GCC_GPP
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#ifdef GUI
+#pragma comment(linker,"/subsystem:windows")
+#else
+#pragma comment(linker,"/subsystem:console")
+#endif
+#endif
 
 #define MAX_MODULES 128
 #define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //#16 -> "?? " + #1 -> "+\0" (worst case)
@@ -77,7 +81,11 @@ typedef struct
 int busy = 0;
 
 //Prototypes
+#ifdef GUI
+int scan();
+#else
 int main();
+#endif
 DWORD loadFromFile(char* filename, char** buffer);
 DWORD64 virtualAddressToFileAddress(DWORD64 virtualAddress, SECTION_HEADER_LIST* sectionHeaders);
 void applyRelocation(void* fileBuffer, RELOC* pReloc, SECTION_HEADER_LIST* sectionHeaders);
@@ -106,50 +114,32 @@ HFONT hFont = NULL;
 
 WIN_PROCESS processes[MAX_PROCESSES];
 
+LPCTSTR mainWindowClass = "mainWindowClass";
+
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nCmdShow)
 {
-	BYTE className[] = "mainWindowClass";
 	MSG msg;
 
-	WNDCLASS wndClass = { 0 };
-	wndClass.hInstance = hInst;
-	wndClass.lpszClassName = (LPCSTR)className;
+	WNDCLASSEX wndClass = { 0 };
+	wndClass.cbSize = sizeof(wndClass);
+	wndClass.cbClsExtra = 0;
+	wndClass.cbWndExtra = 0;
+	wndClass.lpszClassName = mainWindowClass;
 	wndClass.lpfnWndProc = WindowProc;
-	wndClass.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_3DFACE);
 	wndClass.style = CS_HREDRAW | CS_VREDRAW;
+	wndClass.hInstance = hInst;
+	wndClass.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_3DFACE);
 	wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
 
-	RegisterClass(&wndClass);
+	RegisterClassEx(&wndClass);
 
-	/*
-	[CreateWindow]:
-	lpClassName
-	lpWindowName
-	dwStyle
-	x
-	y
-	nWidth
-	nHeight
-	hWndParent
-	hMenu
-	hInstance
-	lpParam
-	*/
-	hwndMain = CreateWindow((LPCSTR)className,
-		"Patch Scanner",
-		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-		CW_USEDEFAULT,
-		CW_USEDEFAULT,
-		1112,
-		360,
-		NULL,
-		NULL,
-		hInst,
-		NULL);
+	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
+	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
 
 	if (hwndMain)
 	{ 
 		ShowWindow(hwndMain, nCmdShow);
+		UpdateWindow(hwndMain);
 		while (GetMessage(&msg, NULL, 0, 0))
 		{
 			TranslateMessage(&msg);
@@ -251,7 +241,7 @@ void onScanButtonClick()
 {
 	if (!busy)
 	{
-		_beginthread((_beginthread_proc_type)main, 0, NULL);
+		_beginthread((_beginthread_proc_type)scan, 0, NULL);
 	}
 	else
 	{
@@ -344,7 +334,11 @@ void getProcesses(WIN_PROCESS* processes)
 }
 #endif
 
+#ifdef GUI
+int scan()
+#else
 int main()
+#endif
 {
 	//Heap
 	void** fileBuffer = NULL; //Array - Loaded files
