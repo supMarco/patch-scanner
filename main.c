@@ -13,16 +13,13 @@
 #include <stdio.h>
 #include <time.h>
 
-#define GUI //Comment this out for the console version
-#define GCC_GPP //Comment this out for MSVC
-
 #ifdef GUI
 #include <tlhelp32.h>
 #include <commctrl.h>
 #include <stdlib.h>
 #endif
 
-#ifndef GCC_GPP
+#ifndef MSYS2
 //MSVC only
 #pragma comment(lib,"shlwapi.lib")
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' " "version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -133,8 +130,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nC
 
 	RegisterClassEx(&wndClass);
 
-	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
-	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
+	//[CreateWindowEx]: dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
+	#ifdef _WIN64
+	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 64bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
+	#else
+	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 32bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
+	#endif
 
 	if (hwndMain)
 	{ 
