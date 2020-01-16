@@ -30,7 +30,7 @@
 #endif
 #endif
 
-#define MAX_MODULES 128
+#define MAX_MODULES 512
 #define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //#16 -> "?? " + #1 -> "+\0" (worst case)
 
 #ifdef GUI
@@ -38,6 +38,7 @@
 #define ID_SCAN_BUTTON 1001
 #define ID_PROCESS_LIST 2001
 #define ID_PATCH_LIST 2002
+#define ID_LOG_LIST 2003
 #define ID_PROGRESS_BAR_01 3001
 #define ID_PROGRESS_BAR_02 3002
 #define ID_MENU_PROCESS_LIST_REFRESH 4001
@@ -99,12 +100,14 @@ void onScanButtonClick();
 void onMenuItemRefreshClick();
 void updateProcessList(WIN_PROCESS* processes);
 void updatePatchList(PATCH_LIST* patches);
+void addLogList(char* log);
 void getProcesses(WIN_PROCESS* processes);
 
 HWND hwndMain = NULL;
 HWND hwndScanButton = NULL;
 HWND hwndProcessList = NULL;
 HWND hwndPatchList = NULL;
+HWND hwndLogList = NULL;
 HWND hwndScanProgressBar01 = NULL;
 HWND hwndScanProgressBar02 = NULL;
 HFONT hFont = NULL;
@@ -132,9 +135,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nC
 
 	//[CreateWindowEx]: dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
 	#ifdef _WIN64
-	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 64bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
+	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 64bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 565, NULL, NULL, hInst, NULL);
 	#else
-	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 32bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 360, NULL, NULL, hInst, NULL);
+	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 32bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 565, NULL, NULL, hInst, NULL);
 	#endif
 
 	if (hwndMain)
@@ -194,17 +197,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 void onWindowCreate(HWND hwnd)
 {
 	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
-	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 275, 350, 32, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
-	hwndProcessList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 250, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
+	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 480, 350, 32, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
+	hwndProcessList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 450, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
 	hwndPatchList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 15, 700, 250, hwnd, (HMENU)ID_PATCH_LIST, NULL, NULL);
-	hwndScanProgressBar01 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 276, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_01, NULL, NULL);
-	hwndScanProgressBar02 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 292, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_02, NULL, NULL);
+	hwndLogList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 280, 700, 185, hwnd, (HMENU)ID_LOG_LIST, NULL, NULL);
+	hwndScanProgressBar01 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 481, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_01, NULL, NULL);
+	hwndScanProgressBar02 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 497, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_02, NULL, NULL);
 
 	//Set Font
 	hFont = CreateFont(19, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, TEXT("Segoe UI"));
 	SendMessage(hwndScanButton, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
 	SendMessage(hwndProcessList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
 	SendMessage(hwndPatchList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+	SendMessage(hwndLogList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
 
 	//Init Lists
 	LVCOLUMN lvc;
@@ -231,9 +236,15 @@ void onWindowCreate(HWND hwnd)
 	lvc.pszText = "Address";
 	lvc.cx = 180;
 	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	//Log list
+	lvc.iSubItem = 0;
+	lvc.pszText = "Logs";
+	lvc.cx = 700;
+	ListView_InsertColumn(hwndLogList, 0, &lvc);
 
 	ListView_SetExtendedListViewStyle(hwndProcessList, LVS_EX_FULLROWSELECT);
 	ListView_SetExtendedListViewStyle(hwndPatchList, LVS_EX_FULLROWSELECT);
+	ListView_SetExtendedListViewStyle(hwndLogList, LVS_EX_FULLROWSELECT);
 
 	updateProcessList(processes);
 }
@@ -314,6 +325,16 @@ void updateProcessList(WIN_PROCESS* processes)
 	ListView_EnsureVisible(hwndProcessList, currPos, TRUE);
 }
 
+void addLogList(char* log)
+{
+	LVITEM lvi;
+	lvi.mask = LVIF_TEXT;
+	lvi.iItem = ListView_GetItemCount(hwndLogList);
+	lvi.iSubItem = 0;
+	lvi.pszText = log;
+	ListView_InsertItem(hwndLogList, &lvi);
+}
+
 void getProcesses(WIN_PROCESS* processes)
 {
 	HANDLE hProcess = NULL;
@@ -350,7 +371,7 @@ int main()
 	RELOC* pReloc = NULL; //Struct
 
 	//Stack
-	HMODULE hModules[512] = { NULL };
+	HMODULE hModules[MAX_MODULES] = { NULL };
 	DWORD PID = 0;
 	unsigned long int patchesCount = 0;
 	unsigned long int modulesCount = 0;
@@ -360,8 +381,14 @@ int main()
 	PIMAGE_SECTION_HEADER pImageSectionHeader = NULL;
 	PIMAGE_OPTIONAL_HEADER32 pImageOptionalHeader32 = NULL;
 	PIMAGE_OPTIONAL_HEADER64 pImageOptionalHeader64 = NULL;
+	char scan_log[128] = { 0 };
 
 	busy = 1;
+
+#ifdef GUI
+	//Empty log listview
+	ListView_DeleteAllItems(hwndLogList);
+#endif
 
 	//Collect input
 #ifndef GUI
@@ -387,6 +414,10 @@ int main()
 	//Verify OpenProcess success
 	if (!hProcess)
 	{
+#ifdef GUI
+		//insert error in the log listview
+		addLogList("[Error] Couldn't attach to this process.");
+#endif
 		busy = 0;
 		return 0;
 	}
@@ -421,8 +452,28 @@ int main()
 	//Load modules (files)
 	for (int m = 0; hModules[m]; m++, modulesCount++)
 	{
-		loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m));
+		if (!loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m)))
+		{
+#ifdef GUI
+			//insert error in the log listview
+			RtlZeroMemory(scan_log, 128);
+			strcat(scan_log, "Error]");
+			PathStripPathA(moduleFileName + m * MAX_PATH);
+			strcat(scan_log, moduleFileName + m * MAX_PATH);
+			strcat(scan_log, ": couldn't load this file.");
+			addLogList(scan_log);
+			//temp solution
+			break;
+#endif
+		}
 	}
+
+#ifdef GUI
+	//Loaded modules log
+	RtlZeroMemory(scan_log, 128);
+	snprintf(scan_log, 128, "[Log] Modules loaded: %d/%d", modulesCount, cbNeeded / sizeof(HMODULE));
+	addLogList(scan_log);
+#endif
 
 	//Set progressbar range and increment + empty patch listview
 #ifdef GUI
@@ -576,6 +627,10 @@ int main()
 	printPatchList(patches);
 #else
 	updatePatchList(patches);
+	//Patch count log
+	RtlZeroMemory(scan_log, 128);
+	snprintf(scan_log, 128, "[Log] Patches: %d", patchesCount);
+	addLogList(scan_log);
 #endif
 
 	//Free list
@@ -590,7 +645,10 @@ int main()
 #ifndef GUI
 	fprintf(stdout, "\n\n(Execution time: %f seconds)\n", (double)(stop - start) / CLOCKS_PER_SEC);
 #else
-	//not now
+	//Execution time log
+	RtlZeroMemory(scan_log, 128);
+	snprintf(scan_log, 128, "[Log] Execution time: %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+	addLogList(scan_log);
 #endif
 	busy = 0;
 	return 0;
