@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <time.h>
 
+#define GUI
+
 #ifdef GUI
 #include <tlhelp32.h>
 #include <commctrl.h>
@@ -439,7 +441,8 @@ int main()
 #ifndef GUI
 		fprintf(stdout, "Use 64bit version\r\n");
 #else
-		MessageBoxA(NULL, "Use 64bit version", "Error", MB_ICONERROR);
+		//insert error in the log listview
+		addLogList("[Error] Use 64bit version.");
 #endif
 		busy = 0;
 		return 0;
@@ -457,7 +460,7 @@ int main()
 #ifdef GUI
 			//insert error in the log listview
 			RtlZeroMemory(scan_log, 128);
-			strcat(scan_log, "Error]");
+			strcat(scan_log, "[Error] ");
 			PathStripPathA(moduleFileName + m * MAX_PATH);
 			strcat(scan_log, moduleFileName + m * MAX_PATH);
 			strcat(scan_log, ": couldn't load this file.");
