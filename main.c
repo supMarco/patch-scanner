@@ -13,8 +13,6 @@
 #include <stdio.h>
 #include <time.h>
 
-#define GUI
-
 #ifdef GUI
 #include <tlhelp32.h>
 #include <commctrl.h>
