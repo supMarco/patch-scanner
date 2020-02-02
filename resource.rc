@@ -1,0 +1,4 @@
+#include <windows.h>
+
+//Manifest
+1 RT_MANIFEST "patchscanner.manifest"
