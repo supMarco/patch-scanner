@@ -689,8 +689,6 @@ int main()
 						}
 #ifdef GUI
 						SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionheaders->pimagesectionheader->SizeOfRawData), 0); //Progressbar step
-						snprintf(tmpbuffer, BUFFER_SIZE, " -> patches: %d", currentmodulepatchescount);
-						concatenateLogListView(tmpbuffer, currentlybeingscannedmodulelwindex);
 #endif
 					}
 					else
@@ -708,6 +706,8 @@ int main()
 		hmodules[m] = NULL;
 #ifdef GUI
 		SendMessage(hwndScanProgressBar02, PBM_STEPIT, 0, 0); //Progressbar step
+		snprintf(tmpbuffer, BUFFER_SIZE, " -> patches: %d", currentmodulepatchescount);
+		concatenateLogListView(tmpbuffer, currentlybeingscannedmodulelwindex);
 #endif
 	}
 	free(filebuffer);
