@@ -12,12 +12,9 @@
 #include <psapi.h>
 #include <stdio.h>
 #include <time.h>
-
-#ifdef GUI
 #include <tlhelp32.h>
 #include <commctrl.h>
 #include <stdlib.h>
-#endif
 
 #ifndef MSYS2
 #pragma comment(lib,"shlwapi.lib")
@@ -28,53 +25,56 @@
 #endif
 #endif
 
-#define MAX_MODULES 512
-#define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //#16 -> "?? " + #1 -> "+\0" (worst case)
+#define BUFFER_SIZE 512
+#define MODULE_PLACEHOLDER -1
 
-#ifdef GUI
-#define MAX_PROCESSES 512
+#define MAX_MODULES 1024
+#define MAX_PROCESSES 1024
+#define MAX_SHOWN_PATCH_SIZE 16*3+1*2 //16 -> "?? "   +   1 -> "+\0" (worst case)
+
+#define DATA_DIRECTORIES_OFFSET_X64 0x70
+#define DATA_DIRECTORIES_OFFSET_X86 0x60
+#define RELOCATION_DATA_DIRECTORY_INDEX 5
+
 #define ID_SCAN_BUTTON 1001
 #define ID_PROCESS_LIST 2001
 #define ID_PATCH_LIST 2002
 #define ID_LOG_LIST 2003
 #define ID_PROGRESS_BAR_01 3001
 #define ID_PROGRESS_BAR_02 3002
-#define ID_MENU_PROCESS_LIST_REFRESH 4001
-#endif
+#define ID_MENU_PROCESS_LISTVIEW_REFRESH 4001
 
-//Structs & Lists
+int busy = 0;
+
+//Structs + Lists
 typedef struct patch_list
 {
-	char moduleName[MAX_PATH];
-	char originalBytes[MAX_SHOWN_PATCH_SIZE];
-	char patchedBytes[MAX_SHOWN_PATCH_SIZE];
-	DWORD64 patchedBytesOffset;
-	unsigned long int patchedBytesCount;
+	char modulename[MAX_PATH];
+	char originalbytes[MAX_SHOWN_PATCH_SIZE];
+	char patchedbytes[MAX_SHOWN_PATCH_SIZE];
+	DWORD64 patchedbytesoffset;
+	unsigned long int patchedbytescount;
 	struct patch_list* next;
 } PATCH_LIST;
 
 typedef struct section_header_list
 {
-	PIMAGE_SECTION_HEADER pImageSectionHeader;
+	PIMAGE_SECTION_HEADER pimagesectionheader;
 	struct section_header_list* next;
 } SECTION_HEADER_LIST;
 
-typedef struct
+typedef struct reloc
 {
-	PIMAGE_DATA_DIRECTORY pImageRelocationDataDirectory;
-	PIMAGE_BASE_RELOCATION pImageBaseRelocation;
-	DWORD64 relocationOffset;
+	PIMAGE_DATA_DIRECTORY pimagerelocationdatadirectory;
+	PIMAGE_BASE_RELOCATION pimagebaserelocation;
+	DWORD64 relocationoffset;
 } RELOC;
 
-#ifdef GUI
-typedef struct 
+typedef struct win_process
 {
 	char name[MAX_PATH];
 	DWORD pid;
 } WIN_PROCESS;
-#endif
-
-int busy = 0;
 
 //Prototypes
 #ifdef GUI
@@ -83,65 +83,69 @@ int scan();
 int main();
 #endif
 DWORD loadFromFile(char* filename, char** buffer);
-DWORD64 virtualAddressToFileAddress(DWORD64 virtualAddress, SECTION_HEADER_LIST* sectionHeaders);
-void applyRelocation(void* fileBuffer, RELOC* pReloc, SECTION_HEADER_LIST* sectionHeaders);
-void sectionHeaderListAddLast(SECTION_HEADER_LIST** pSectionHeaders, SECTION_HEADER_LIST* node);
-void patchListAddLast(PATCH_LIST** pPatches, PATCH_LIST* node);
-void sectionHeaderListFree(SECTION_HEADER_LIST** pSectionHeaders);
-void patchListFree(PATCH_LIST** pPatches);
+DWORD64 virtualaddressToFileAddress(DWORD64 virtualaddress, SECTION_HEADER_LIST* sectionheaders);
+void applyRelocation(void* filebuffer, RELOC* preloc, SECTION_HEADER_LIST* sectionheaders);
+void sectionHeaderListAddLast(SECTION_HEADER_LIST** psectionheaders, SECTION_HEADER_LIST* shlnode);
+void patchListAddLast(PATCH_LIST** ppatches, PATCH_LIST* plnode);
+void sectionHeaderListFree(SECTION_HEADER_LIST** psectionheaders);
+void patchListFree(PATCH_LIST** ppatches);
+#ifndef GUI
 void printPatchList(PATCH_LIST* patches);
+#endif
 
 #ifdef GUI
 LRESULT CALLBACK WindowProc(HWND, UINT, WPARAM, LPARAM);
 void onWindowCreate(HWND);
+void onWindowClose();
 void onScanButtonClick();
 void onMenuItemRefreshClick();
-void updateProcessList(WIN_PROCESS* processes);
-void updatePatchList(PATCH_LIST* patches);
-void addLogList(char* log);
+void onProcessListViewRightClick();
+void updateProcessListView(WIN_PROCESS* processes);
+void updatePatchListView(PATCH_LIST* patches);
 void getProcesses(WIN_PROCESS* processes);
+void concatenateLogListView(char* str, int itemindex);
+void appendLogListView(char* log);
 
 HWND hwndMain = NULL;
 HWND hwndScanButton = NULL;
-HWND hwndProcessList = NULL;
-HWND hwndPatchList = NULL;
-HWND hwndLogList = NULL;
+HWND hwndProcessListView = NULL;
+HWND hwndPatchListView = NULL;
+HWND hwndLogListView = NULL;
 HWND hwndScanProgressBar01 = NULL;
 HWND hwndScanProgressBar02 = NULL;
-HFONT hFont = NULL;
 
-WIN_PROCESS processes[MAX_PROCESSES];
+HFONT hFontMain = NULL;
 
-LPCTSTR mainWindowClass = "mainWindowClass";
+//__[calloc'd]________________
+WIN_PROCESS* processes = NULL;
+//____________________________
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nCmdShow)
 {
-	MSG msg;
+	BYTE className[] = "mainWindowClass";
+	#ifdef _WIN64
+	BYTE formName[] = "Patch Scanner x64";
+	#else
+	BYTE formName[] = "Patch Scanner x86";
+	#endif
+	MSG msg = { 0 };
 
-	WNDCLASSEX wndClass = { 0 };
-	wndClass.cbSize = sizeof(wndClass);
-	wndClass.cbClsExtra = 0;
-	wndClass.cbWndExtra = 0;
-	wndClass.lpszClassName = mainWindowClass;
-	wndClass.lpfnWndProc = WindowProc;
-	wndClass.style = CS_HREDRAW | CS_VREDRAW;
-	wndClass.hInstance = hInst;
+	WNDCLASS wndClass = { 0 };
+	wndClass.hInstance = (HINSTANCE)hInst;
+	wndClass.lpszClassName = (LPCSTR)className;
+	wndClass.lpfnWndProc = (WNDPROC)WindowProc;
 	wndClass.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_3DFACE);
-	wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wndClass.style = (UINT)(CS_HREDRAW | CS_VREDRAW);
+	wndClass.hCursor = (HCURSOR)LoadCursor(NULL, IDC_ARROW);
 
-	RegisterClassEx(&wndClass);
+	RegisterClass(&wndClass);
 
 	//[CreateWindowEx]: dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
-	#ifdef _WIN64
-	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 64bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 565, NULL, NULL, hInst, NULL);
-	#else
-	hwndMain = CreateWindowEx(wndClass.style, wndClass.lpszClassName, "Patch Scanner 32bit", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 565, NULL, NULL, hInst, NULL);
-	#endif
+    hwndMain = CreateWindow((LPCSTR)className, (LPCSTR)formName, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 1112, 565, NULL, NULL, hInst, NULL);
 
 	if (hwndMain)
 	{ 
 		ShowWindow(hwndMain, nCmdShow);
-		UpdateWindow(hwndMain);
 		while (GetMessage(&msg, NULL, 0, 0))
 		{
 			TranslateMessage(&msg);
@@ -158,6 +162,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	case WM_CREATE:
 		onWindowCreate(hwnd);
 		return 0;
+	case WM_CLOSE:
+		onWindowClose();
+		break;
 	case WM_DESTROY:
 		PostQuitMessage(0);
 		return 0;
@@ -167,7 +174,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case ID_SCAN_BUTTON:
 			onScanButtonClick();
 			return 0;
-		case ID_MENU_PROCESS_LIST_REFRESH:
+		case ID_MENU_PROCESS_LISTVIEW_REFRESH:
 			onMenuItemRefreshClick();
 			return 0;
 		}
@@ -177,14 +184,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case ID_PROCESS_LIST:
 			if (((NMHDR*)lParam)->code == NM_RCLICK)
 			{
-				POINT p;
-				if (GetCursorPos(&p))
-				{
-					HMENU hPopupMenu = CreatePopupMenu();
-					InsertMenu(hPopupMenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_PROCESS_LIST_REFRESH, "Refresh");
-					SetForegroundWindow(hwndMain);
-					TrackPopupMenu(hPopupMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hwndMain, NULL);
-				}
+				onProcessListViewRightClick();
 			}
 			return 0;
 		}
@@ -196,55 +196,73 @@ void onWindowCreate(HWND hwnd)
 {
 	//[CreateWindow]: lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam
 	hwndScanButton = CreateWindow("Button", "Scan", WS_CHILD | WS_VISIBLE, 15, 480, 350, 32, hwnd, (HMENU)ID_SCAN_BUTTON, NULL, NULL);
-	hwndProcessList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 450, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
-	hwndPatchList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 15, 700, 250, hwnd, (HMENU)ID_PATCH_LIST, NULL, NULL);
-	hwndLogList = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 280, 700, 185, hwnd, (HMENU)ID_LOG_LIST, NULL, NULL);
+	hwndProcessListView = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 15, 15, 350, 450, hwnd, (HMENU)ID_PROCESS_LIST, NULL, NULL);
+	hwndPatchListView = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 15, 700, 250, hwnd, (HMENU)ID_PATCH_LIST, NULL, NULL);
+	hwndLogListView = CreateWindow("SysListView32", NULL, WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS, 380, 280, 700, 185, hwnd, (HMENU)ID_LOG_LIST, NULL, NULL);
 	hwndScanProgressBar01 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 481, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_01, NULL, NULL);
 	hwndScanProgressBar02 = CreateWindow("msctls_progress32", NULL, WS_CHILD | WS_VISIBLE, 380, 497, 700, 14, hwnd, (HMENU)ID_PROGRESS_BAR_02, NULL, NULL);
 
 	//Set Font
-	hFont = CreateFont(19, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, TEXT("Segoe UI"));
-	SendMessage(hwndScanButton, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
-	SendMessage(hwndProcessList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
-	SendMessage(hwndPatchList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
-	SendMessage(hwndLogList, WM_SETFONT, (WPARAM)hFont, (LPARAM)0);
+	hFontMain = CreateFont(19, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, VARIABLE_PITCH, TEXT("Segoe UI"));
+	SendMessage(hwndScanButton, WM_SETFONT, (WPARAM)hFontMain, (LPARAM)0);
+	SendMessage(hwndProcessListView, WM_SETFONT, (WPARAM)hFontMain, (LPARAM)0);
+	SendMessage(hwndPatchListView, WM_SETFONT, (WPARAM)hFontMain, (LPARAM)0);
+	SendMessage(hwndLogListView, WM_SETFONT, (WPARAM)hFontMain, (LPARAM)0);
 
 	//Init Lists
-	LVCOLUMN lvc;
+	LVCOLUMN lvc = { 0 };
 	lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+
 	//Process list
 	lvc.iSubItem = 1;
 	lvc.pszText = "Process name";
 	lvc.cx = 300;
-	ListView_InsertColumn(hwndProcessList, 0, &lvc);
+	ListView_InsertColumn(hwndProcessListView, 0, &lvc);
 	lvc.iSubItem = 0;
-	lvc.pszText = "PID";
+	lvc.pszText = "pid";
 	lvc.cx = 100;
-	ListView_InsertColumn(hwndProcessList, 0, &lvc);
+	ListView_InsertColumn(hwndProcessListView, 0, &lvc);
+
 	//Patch list
 	lvc.iSubItem = 2;
 	lvc.pszText = "Patched bytes";
 	lvc.cx = 300;
-	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	ListView_InsertColumn(hwndPatchListView, 0, &lvc);
 	lvc.iSubItem = 1;
 	lvc.pszText = "Original bytes";
 	lvc.cx = 300;
-	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	ListView_InsertColumn(hwndPatchListView, 0, &lvc);
 	lvc.iSubItem = 0;
 	lvc.pszText = "Address";
 	lvc.cx = 180;
-	ListView_InsertColumn(hwndPatchList, 0, &lvc);
+	ListView_InsertColumn(hwndPatchListView, 0, &lvc);
+
 	//Log list
 	lvc.iSubItem = 0;
 	lvc.pszText = "Logs";
 	lvc.cx = 700;
-	ListView_InsertColumn(hwndLogList, 0, &lvc);
+	ListView_InsertColumn(hwndLogListView, 0, &lvc);
 
-	ListView_SetExtendedListViewStyle(hwndProcessList, LVS_EX_FULLROWSELECT);
-	ListView_SetExtendedListViewStyle(hwndPatchList, LVS_EX_FULLROWSELECT);
-	ListView_SetExtendedListViewStyle(hwndLogList, LVS_EX_FULLROWSELECT);
+	//Highlight full row
+	ListView_SetExtendedListViewStyle(hwndProcessListView, LVS_EX_FULLROWSELECT);
+	ListView_SetExtendedListViewStyle(hwndPatchListView, LVS_EX_FULLROWSELECT);
+	ListView_SetExtendedListViewStyle(hwndLogListView, LVS_EX_FULLROWSELECT);
 
-	updateProcessList(processes);
+    //Allocate
+	processes = (WIN_PROCESS*)calloc(MAX_PROCESSES, sizeof(WIN_PROCESS));
+
+	//Get processes
+	updateProcessListView(processes);
+}
+
+void onWindowClose()
+{
+	//Free buffers
+	if (processes)
+	{
+		free(processes);
+		processes = NULL;
+	}
 }
 
 void onScanButtonClick()
@@ -261,96 +279,146 @@ void onScanButtonClick()
 
 void onMenuItemRefreshClick()
 {
-	updateProcessList(processes);
+	updateProcessListView(processes);
 }
 
-void updatePatchList(PATCH_LIST* patches)
+void onProcessListViewRightClick()
 {
-	char temp[32] = { 0 };
-	LVITEM lvi;
-	lvi.mask = LVIF_TEXT;
+	HMENU hpopupmenu = NULL;
+	POINT p = { 0 };
 
-	ListView_DeleteAllItems(hwndPatchList);
-
-	for (int i = 0; patches; i++)
+	if (GetCursorPos(&p))
 	{
-		_itoa(patches->patchedBytesOffset, temp, 16);
-		_strupr(temp);
-		strcat(patches->moduleName, "+");
-		strcat(patches->moduleName, temp);
-
-		lvi.iItem = i;
-		lvi.iSubItem = 0;
-		lvi.pszText = patches->moduleName;
-		ListView_InsertItem(hwndPatchList, &lvi);
-		lvi.iSubItem = 1;
-		lvi.pszText = patches->originalBytes;
-		ListView_SetItem(hwndPatchList, &lvi);
-		lvi.iSubItem = 2;
-		lvi.pszText = patches->patchedBytes;
-		ListView_SetItem(hwndPatchList, &lvi);
-
-		patches = patches->next;
+		hpopupmenu = CreatePopupMenu();
+		InsertMenu(hpopupmenu, 0, MF_BYPOSITION | MF_STRING, ID_MENU_PROCESS_LISTVIEW_REFRESH, "Refresh");
+		SetForegroundWindow(hwndMain);
+		TrackPopupMenu(hpopupmenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, p.x, p.y, 0, hwndMain, NULL);
 	}
 }
 
-void updateProcessList(WIN_PROCESS* processes)
+void updatePatchListView(PATCH_LIST* patches)
 {
-	LVITEM lvi;
-	DWORD currPos = 0;
-	char pid[MAX_PATH] = { 0 };
+	LVITEM lvi = { 0 };
+	char* str = NULL;
 
-	currPos = ListView_GetNextItem(hwndProcessList, -1, LVNI_SELECTED);
-
-	lvi.mask = LVIF_TEXT;
-
-	RtlZeroMemory(processes, sizeof(WIN_PROCESS) * MAX_PROCESSES);
-	ListView_DeleteAllItems(hwndProcessList);
-
-	getProcesses(processes);
-
-	for (int i = 0; processes[i].pid | !i; i++)
+	if ((str = (char*)calloc(MAX_PATH, 1)))
 	{
-		lvi.iItem = i;
-		lvi.iSubItem = 0;
-		_itoa(processes[i].pid, pid, 10);
-		lvi.pszText = pid;
-		ListView_InsertItem(hwndProcessList, &lvi);
-		lvi.iSubItem = 1;
-		lvi.pszText = processes[i].name;
-		ListView_SetItem(hwndProcessList, &lvi);
+		lvi.mask = LVIF_TEXT;
+		ListView_DeleteAllItems(hwndPatchListView);
+
+		for (unsigned long int i = 0; patches; i++)
+		{
+			_itoa(patches->patchedbytesoffset, str, 16);
+			_strupr(str);
+			strcat(patches->modulename, "+");
+			strcat(patches->modulename, str);
+			lvi.iItem = i;
+			lvi.iSubItem = 0;
+			lvi.pszText = patches->modulename;
+			ListView_InsertItem(hwndPatchListView, &lvi);
+			lvi.iSubItem = 1;
+			lvi.pszText = patches->originalbytes;
+			ListView_SetItem(hwndPatchListView, &lvi);
+			lvi.iSubItem = 2;
+			lvi.pszText = patches->patchedbytes;
+			ListView_SetItem(hwndPatchListView, &lvi);
+			patches = patches->next;
+		}
+		free(str);
+		str = NULL;
 	}
-	ListView_EnsureVisible(hwndProcessList, currPos, TRUE);
 }
 
-void addLogList(char* log)
+void updateProcessListView(WIN_PROCESS* processes)
 {
-	LVITEM lvi;
+	LVITEM lvi = { 0 };
+	DWORD currpos = 0;
+	char* pid = NULL;
+
+	if ((pid = (char*)calloc(MAX_PATH, 1)))
+	{
+		currpos = ListView_GetNextItem(hwndProcessListView, -1, LVNI_SELECTED);
+		lvi.mask = LVIF_TEXT;
+		RtlZeroMemory(processes, sizeof(WIN_PROCESS) * MAX_PROCESSES);
+		ListView_DeleteAllItems(hwndProcessListView);
+
+		getProcesses(processes);
+
+		for (unsigned long int i = 0; processes[i].pid | !i; i++)
+		{
+			lvi.iItem = i;
+			lvi.iSubItem = 0;
+			_itoa(processes[i].pid, pid, 10);
+			lvi.pszText = pid;
+			ListView_InsertItem(hwndProcessListView, &lvi);
+			lvi.iSubItem = 1;
+			lvi.pszText = processes[i].name;
+			ListView_SetItem(hwndProcessListView, &lvi);
+		}
+		ListView_EnsureVisible(hwndProcessListView, currpos, TRUE);
+		free(pid);
+		pid = NULL;
+	}
+}
+
+void appendLogListView(char* log)
+{
+	LVITEM lvi = { 0 };
+	int itemcount = 0;
+
+	itemcount = ListView_GetItemCount(hwndLogListView);
 	lvi.mask = LVIF_TEXT;
-	lvi.iItem = ListView_GetItemCount(hwndLogList);
+	lvi.iItem = itemcount;
 	lvi.iSubItem = 0;
 	lvi.pszText = log;
-	ListView_InsertItem(hwndLogList, &lvi);
+	ListView_InsertItem(hwndLogListView, &lvi);
+	ListView_EnsureVisible(hwndLogListView, itemcount, FALSE);
+}
+
+void concatenateLogListView(char* str, int itemindex)
+{
+	LVITEM lvi = { 0 };
+	char* newstr = NULL;
+
+	if ( (newstr = (char*)calloc(MAX_PATH, 1)) )
+	{
+		lvi.mask = LVIF_TEXT;
+		lvi.iItem = itemindex;
+		lvi.iSubItem = 0;
+		lvi.cchTextMax = MAX_PATH;
+		lvi.pszText = newstr;
+
+		ListView_GetItem(hwndLogListView, &lvi);
+
+		strcat(newstr, str);
+		lvi.pszText = newstr;
+
+		ListView_SetItem(hwndLogListView, &lvi);
+		ListView_EnsureVisible(hwndLogListView, itemindex, FALSE);
+		free(newstr);
+		newstr = NULL;
+	}
 }
 
 void getProcesses(WIN_PROCESS* processes)
 {
-	HANDLE hProcess = NULL;
-	PROCESSENTRY32 processEntry;
-	processEntry.dwSize = sizeof(PROCESSENTRY32);
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	HANDLE hprocess = NULL;
+	HANDLE hsnapshot = NULL;
+	PROCESSENTRY32 processEntry = { 0 };
+	int i = 0;
 
-	if (hSnapshot != INVALID_HANDLE_VALUE && Process32First(hSnapshot, &processEntry))
+	processEntry.dwSize = sizeof(PROCESSENTRY32);
+
+	if ( ((hsnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)) != INVALID_HANDLE_VALUE) && Process32First(hsnapshot, &processEntry) )
 	{
-		int i = 0;
 		do
 		{
 			strcpy(processes[i].name, processEntry.szExeFile);
 			processes[i].pid = processEntry.th32ProcessID;
 			i++;
-		} while (Process32Next(hSnapshot, &processEntry));
+		} while ( Process32Next(hsnapshot, &processEntry) && (i < MAX_PROCESSES) );
 	}
-	CloseHandle(hSnapshot);
+	CloseHandle(hsnapshot);
 }
 #endif
 
@@ -360,315 +428,381 @@ int scan()
 int main()
 #endif
 {
-	//Heap
-	void** fileBuffer = NULL; //Array - Loaded files
-	void* vmBuffer = NULL; 
-	char* moduleFileName = NULL; //2D Array - Module names + paths
-	SECTION_HEADER_LIST* executableAndRelocSectionHeaders = NULL; //Singly Linked List - Executable sections + Relocation section (if available)
-	PATCH_LIST* patches = NULL; //Singly Linked List
-	RELOC* pReloc = NULL; //Struct
+	//__[calloc'd]______________________________________________________________________________________________________________________________
+	void** filebuffer = NULL; //Array of loaded files
+	void* vmbuffer = NULL; 
+	char* tmpbuffer = NULL;
+	char* modulefilename = NULL; //2D Array of (Module names + paths)
+	SECTION_HEADER_LIST* executableandrelocsectionheaders = NULL; //Singly Linked List (Executable sections + Relocation section (if available))
+	PATCH_LIST* patches = NULL; //Singly Linked List (Patches)
+	RELOC* preloc = NULL;
+	HMODULE* hmodules = NULL;
+	//__________________________________________________________________________________________________________________________________________
 
 	//Stack
-	HMODULE hModules[MAX_MODULES] = { NULL };
-	DWORD PID = 0;
-	unsigned long int patchesCount = 0;
-	unsigned long int modulesCount = 0;
-	void* filePosition = NULL;
-	PIMAGE_DOS_HEADER pImageDosHeader = NULL;
-	PIMAGE_FILE_HEADER pImageFileHeader = NULL;
-	PIMAGE_SECTION_HEADER pImageSectionHeader = NULL;
-	PIMAGE_OPTIONAL_HEADER32 pImageOptionalHeader32 = NULL;
-	PIMAGE_OPTIONAL_HEADER64 pImageOptionalHeader64 = NULL;
-	char scan_log[128] = { 0 };
+	DWORD pid = 0;
+	HANDLE hprocess = NULL;
+	unsigned long int patchescount = 0;
+	unsigned long int currentmodulepatchescount = 0;
+	unsigned long int modulescount = 0;
+	unsigned long int notloadedmodulescount = 0;
+	PIMAGE_DOS_HEADER pimagedosheader = NULL;
+	PIMAGE_FILE_HEADER pimagefileheader = NULL;
+	PIMAGE_SECTION_HEADER pimagesectionheader = NULL;
+	PIMAGE_OPTIONAL_HEADER32 pimageoptionalheader32 = NULL;
+	PIMAGE_OPTIONAL_HEADER64 pimageoptionalheader64 = NULL;
+	void* fileposition = NULL;
+	clock_t stop = 0;
+	clock_t start = 0;
 
 	busy = 1;
 
-#ifdef GUI
-	//Empty log listview
-	ListView_DeleteAllItems(hwndLogList);
-#endif
+	//Allocate some buffers and zero-out the allocated memory
+	hmodules = (HMODULE*)calloc(MAX_MODULES+1, sizeof(HMODULE));
+	modulefilename = (char*)calloc(MAX_MODULES+1, MAX_PATH);
+	tmpbuffer = (char*)calloc(BUFFER_SIZE, 1);
+	preloc = (RELOC*)calloc(1, sizeof(RELOC));
 
 	//Collect input
 #ifndef GUI
 	setvbuf(stdout, NULL, _IONBF, 0);
-
-	//Get process PID as user input
 	fprintf(stdout, "Process ID: >");
-	if (fscanf(stdin, "%lu", &PID) <= 0) return 0;
 
-	//Clear shell
+	if (fscanf(stdin, "%lu", &pid) <= 0)
+	{
+		goto free_and_quit;
+	}
 	system("@cls||clear");
 #else
-	char temp[16] = { 0 };
-	ListView_GetItemText(hwndProcessList, ListView_GetNextItem(hwndProcessList, -1, LVNI_SELECTED), 0, temp, 16);
-	PID = _atoi64(temp);
+	ListView_DeleteAllItems(hwndLogListView); //Empty log listview
+
+	ListView_GetItemText(hwndProcessListView, ListView_GetNextItem(hwndProcessListView, -1, LVNI_SELECTED), 0, tmpbuffer, 16);
+	pid = _atoi64(tmpbuffer);
 #endif
-
-	//Execution time
-	clock_t start = clock(), stop = 0;
-
-	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, PID);
+	start = clock(); //Execution time
 
 	//Verify OpenProcess success
-	if (!hProcess)
+	if ( !(hprocess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid)) )
 	{
 #ifdef GUI
-		//insert error in the log listview
-		addLogList("[Error] Couldn't attach to this process.");
+		appendLogListView("[Error] Couldn't attach to this process."); //Insert error in the log listview
 #endif
-		busy = 0;
-		return 0;
+		goto free_and_quit;
 	}
-
-	//Allocate some buffers and zero-out the allocated memory (calloc)
-	moduleFileName = (char*)calloc(MAX_MODULES + 1, MAX_PATH); //char moduleFileName[MAX_MODULES][MAX_PATH] = { 0 };
 
 	//Collect process modules and paths
 	DWORD cbNeeded = 0;
-	if (EnumProcessModules(hProcess, hModules, sizeof(hModules), &cbNeeded))
+	if (EnumProcessModules(hprocess, hmodules, MAX_MODULES, &cbNeeded))
 	{
-		for (int m = 0; hModules[m]; m++)
+		for (unsigned long int m = 0; hmodules[m]; m++)
 		{
-			GetModuleFileNameEx(hProcess, hModules[m], moduleFileName+m*MAX_PATH, MAX_PATH);
+			GetModuleFileNameEx(hprocess, hmodules[m], modulefilename+m*MAX_PATH, MAX_PATH);
 		}
 	}
 	else
 	{
 #ifndef GUI
-		fprintf(stdout, "Use 64bit version\r\n");
+		fprintf(stdout, "Use x64 version\r\n");
 #else
 		//insert error in the log listview
-		addLogList("[Error] Use 64bit version.");
+		appendLogListView("[Error] Use x64 version.");
 #endif
-		busy = 0;
-		return 0;
+		goto free_and_quit;
 	}
 
-	//Allocate some buffers and zero-out the allocated memory (calloc)
-	fileBuffer = (void**)calloc((cbNeeded / sizeof(HMODULE)) + 1, sizeof(void*)); //void * fileBuffer[PROCESS_MODULES_COUNT] = { NULL };
-	pReloc = (RELOC*)calloc(1, sizeof(RELOC));
+	//Allocate some buffers and zero-out the allocated memory
+	filebuffer = (void**)calloc((cbNeeded / sizeof(HMODULE)) + 1, sizeof(void*));
 
 	//Load modules (files)
-	for (int m = 0; hModules[m]; m++, modulesCount++)
+	for (unsigned long int m = 0; hmodules[m]; m++, modulescount++)
 	{
-		if (!loadFromFile(moduleFileName + m * MAX_PATH, (char**)(fileBuffer + m)))
+		if (!loadFromFile(modulefilename+m*MAX_PATH, (char**)(filebuffer + m)))
 		{
 #ifdef GUI
-			//insert error in the log listview
-			RtlZeroMemory(scan_log, 128);
-			strcat(scan_log, "[Error] ");
-			PathStripPathA(moduleFileName + m * MAX_PATH);
-			strcat(scan_log, moduleFileName + m * MAX_PATH);
-			strcat(scan_log, ": couldn't load this file.");
-			addLogList(scan_log);
-			//temp solution
-			break;
+			strcpy(tmpbuffer, "[Error] ");
+			PathStripPathA(modulefilename+m*MAX_PATH);
+			strcat(tmpbuffer, modulefilename+ m*MAX_PATH);
+			strcat(tmpbuffer, ": couldn't load this file.");
+			appendLogListView(tmpbuffer);		
+			filebuffer[m] = hmodules[m] = MODULE_PLACEHOLDER;
+			notloadedmodulescount++;
+			continue;
 #endif
 		}
 	}
 
 #ifdef GUI
-	//Loaded modules log
-	RtlZeroMemory(scan_log, 128);
-	snprintf(scan_log, 128, "[Log] Modules loaded: %d/%d", modulesCount, cbNeeded / sizeof(HMODULE));
-	addLogList(scan_log);
+	snprintf(tmpbuffer, BUFFER_SIZE, "[Log] Modules loaded: %d/%d", (modulescount-notloadedmodulescount), modulescount);
+	appendLogListView(tmpbuffer);
 #endif
 
-	//Set progressbar range and increment + empty patch listview
+	//Set progressbars range and increment and empty patch listview
 #ifdef GUI
-	SendMessage(hwndScanProgressBar02, PBM_SETRANGE, 0, MAKELPARAM(0, modulesCount));
+	SendMessage(hwndScanProgressBar02, PBM_SETRANGE, 0, MAKELPARAM(0, modulescount));
 	SendMessage(hwndScanProgressBar02, PBM_SETSTEP, (WPARAM)1, 0);
 	SendMessage(hwndScanProgressBar02, PBM_SETPOS, 0, 0);
-	ListView_DeleteAllItems(hwndPatchList);
+
+	SendMessage(hwndScanProgressBar01, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+	SendMessage(hwndScanProgressBar01, PBM_SETSTEP, (WPARAM)1, 0);
+	SendMessage(hwndScanProgressBar01, PBM_SETPOS, 0, 0);
+
+	ListView_DeleteAllItems(hwndPatchListView);
 #endif
 
-	for (int m = 0; fileBuffer[m]; m++)
+	for (unsigned long int m = 0; filebuffer[m]; m++)
 	{
-		filePosition = fileBuffer[m];
-		pImageDosHeader = (PIMAGE_DOS_HEADER)filePosition;
+
+		if (filebuffer[m] == (void*)MODULE_PLACEHOLDER)
+		{
+			continue;
+		}
+
+		currentmodulepatchescount = 0;
+
+#ifdef GUI
+		PathStripPathA(modulefilename + m * MAX_PATH);
+		snprintf(tmpbuffer, BUFFER_SIZE, "[Log] Scanning: %s", modulefilename + m * MAX_PATH);
+		appendLogListView(tmpbuffer);
+#endif
+
+		fileposition = filebuffer[m];
+		pimagedosheader = (PIMAGE_DOS_HEADER)fileposition;
 
 		//Make sure it's a PE
-		if (pImageDosHeader->e_magic == IMAGE_DOS_SIGNATURE)
+		if (pimagedosheader->e_magic == IMAGE_DOS_SIGNATURE)
 		{
 			//Gather needed PE info
-			filePosition = (BYTE*)filePosition + pImageDosHeader->e_lfanew + sizeof(DWORD32);
-			pImageFileHeader = (PIMAGE_FILE_HEADER)filePosition;
-			filePosition = (BYTE*)filePosition + sizeof(IMAGE_FILE_HEADER);
-			if (pImageFileHeader->Machine == IMAGE_FILE_MACHINE_AMD64)
+			fileposition = (BYTE*)fileposition + pimagedosheader->e_lfanew + sizeof(DWORD32);
+			pimagefileheader = (PIMAGE_FILE_HEADER)fileposition;
+			fileposition = (BYTE*)fileposition + sizeof(IMAGE_FILE_HEADER);
+			if (pimagefileheader->Machine == IMAGE_FILE_MACHINE_AMD64)
 			{
-				pImageOptionalHeader64 = (PIMAGE_OPTIONAL_HEADER64)filePosition;
-				pReloc->relocationOffset = (DWORD64)((BYTE*)hModules[m] - pImageOptionalHeader64->ImageBase);
-				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePosition + 0x70) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
+				pimageoptionalheader64 = (PIMAGE_OPTIONAL_HEADER64)fileposition;
+				preloc->relocationoffset = (DWORD64)((BYTE*)hmodules[m] - pimageoptionalheader64->ImageBase);
+				preloc->pimagerelocationdatadirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)fileposition + DATA_DIRECTORIES_OFFSET_X64) + sizeof(IMAGE_DATA_DIRECTORY) * RELOCATION_DATA_DIRECTORY_INDEX);
 			}
 			else
 			{
-				pImageOptionalHeader32 = (PIMAGE_OPTIONAL_HEADER32)filePosition;
-				pReloc->relocationOffset = (DWORD64)((BYTE*)hModules[m] - pImageOptionalHeader32->ImageBase);
-				pReloc->pImageRelocationDataDirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)filePosition + 0x60) + sizeof(IMAGE_DATA_DIRECTORY) * 5);
+				pimageoptionalheader32 = (PIMAGE_OPTIONAL_HEADER32)fileposition;
+				preloc->relocationoffset = (DWORD64)((BYTE*)hmodules[m] - pimageoptionalheader32->ImageBase);
+				preloc->pimagerelocationdatadirectory = (PIMAGE_DATA_DIRECTORY)(((BYTE*)fileposition + DATA_DIRECTORIES_OFFSET_X86) + sizeof(IMAGE_DATA_DIRECTORY) * RELOCATION_DATA_DIRECTORY_INDEX);
 			}
-			filePosition = (BYTE*)filePosition + pImageFileHeader->SizeOfOptionalHeader;
+			fileposition = (BYTE*)fileposition + pimagefileheader->SizeOfOptionalHeader;
 
 			//Filter executable sections (& .reloc)
-			for (int i = 0; i < pImageFileHeader->NumberOfSections; i++, filePosition = (BYTE*)filePosition + sizeof(IMAGE_SECTION_HEADER))
+			for (unsigned long int i = 0; i < pimagefileheader->NumberOfSections; i++, fileposition = (BYTE*)fileposition + sizeof(IMAGE_SECTION_HEADER))
 			{
-				pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePosition;
-				if ((pImageSectionHeader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp((char*)pImageSectionHeader->Name, ".reloc"))
+				pimagesectionheader = (PIMAGE_SECTION_HEADER)fileposition;
+				if ((pimagesectionheader->Characteristics & IMAGE_SCN_CNT_CODE) || !strcmp((char*)pimagesectionheader->Name, ".reloc"))
 				{
-					SECTION_HEADER_LIST* node = (SECTION_HEADER_LIST*)calloc(1, sizeof(SECTION_HEADER_LIST));
-					node->pImageSectionHeader = (PIMAGE_SECTION_HEADER)filePosition;
-					node->next = NULL;
-					sectionHeaderListAddLast(&executableAndRelocSectionHeaders, node);
+					SECTION_HEADER_LIST* shlnode = (SECTION_HEADER_LIST*)calloc(1, sizeof(SECTION_HEADER_LIST));
+					shlnode->pimagesectionheader = (PIMAGE_SECTION_HEADER)fileposition;
+					shlnode->next = NULL;
+					sectionHeaderListAddLast(&executableandrelocsectionheaders, shlnode);
 				}
 			}
 
 			//Apply relocation
-			if (pReloc->relocationOffset)
+			if (preloc->relocationoffset)
 			{
-				applyRelocation(fileBuffer[m], pReloc, executableAndRelocSectionHeaders);
+				applyRelocation(filebuffer[m], preloc, executableandrelocsectionheaders);
 			}
 
 			//Scan for current module's patches
-			SECTION_HEADER_LIST* sectionHeaders = executableAndRelocSectionHeaders;
-			for (;sectionHeaders; sectionHeaders = sectionHeaders->next)
+			SECTION_HEADER_LIST* sectionheaders = executableandrelocsectionheaders;
+			for (;sectionheaders; sectionheaders = sectionheaders->next)
 			{
 				//Skip .reloc
-				if (!strcmp((char*)sectionHeaders->pImageSectionHeader->Name, ".reloc"))
+				if (!strcmp((char*)sectionheaders->pimagesectionheader->Name, ".reloc"))
+				{
 					continue;
+				}
 
-				vmBuffer = malloc(sectionHeaders->pImageSectionHeader->SizeOfRawData);
-				if (vmBuffer)
+				if ( (vmbuffer = (void*)calloc(1, sectionheaders->pimagesectionheader->SizeOfRawData)) )
 				{
 #ifdef _WIN64
-					long long unsigned int byteRead = 0;
+					long long unsigned int bytesread = 0;
+					long long unsigned int position = 0;
 #else
-					long unsigned int byteRead = 0;
-#endif
+					long unsigned int bytesread = 0;
 					long unsigned int position = 0;
-					ReadProcessMemory(hProcess, (BYTE*)hModules[m] + sectionHeaders->pImageSectionHeader->VirtualAddress, vmBuffer, sectionHeaders->pImageSectionHeader->SizeOfRawData, &byteRead);
+#endif
+					ReadProcessMemory(hprocess, (BYTE*)hmodules[m] + sectionheaders->pimagesectionheader->VirtualAddress, vmbuffer, sectionheaders->pimagesectionheader->SizeOfRawData, &bytesread);
 
 					//Verify ReadProcessMemory success
-					if (byteRead)
+					if (bytesread)
 					{
-						filePosition = (BYTE*)fileBuffer[m] + sectionHeaders->pImageSectionHeader->PointerToRawData;
-						position += RtlCompareMemory(vmBuffer, filePosition, sectionHeaders->pImageSectionHeader->SizeOfRawData);
-
-						//Set progressbar range and increment
-#ifdef GUI
-						SendMessage(hwndScanProgressBar01, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-						SendMessage(hwndScanProgressBar01, PBM_SETSTEP, (WPARAM)1, 0);
-						SendMessage(hwndScanProgressBar01, PBM_SETPOS, 0, 0);
-#endif
+						fileposition = (BYTE*)filebuffer[m] + sectionheaders->pimagesectionheader->PointerToRawData;
+						position += RtlCompareMemory(vmbuffer, fileposition, sectionheaders->pimagesectionheader->SizeOfRawData);
 
 						//For each patch found a node is allocated, filled with the needed info and added to the patch list
-						int k = 0;
-						while (position < sectionHeaders->pImageSectionHeader->SizeOfRawData)
+						unsigned long int k = 0;
+						while (position < sectionheaders->pimagesectionheader->SizeOfRawData)
 						{
-							//Allocate node
-							PATCH_LIST* node = (PATCH_LIST*)calloc(1, sizeof(PATCH_LIST));
-							//Fill node
-							node->patchedBytesCount = 0;
-							strcpy(node->moduleName, moduleFileName + m * MAX_PATH);
-							//Remove path for a 'better' output
-							PathStripPathA(node->moduleName);
-							node->patchedBytesOffset = position;
-
-							while ((position <= sectionHeaders->pImageSectionHeader->SizeOfRawData) && (*((BYTE*)(vmBuffer)+position) != *((BYTE*)(filePosition)+position)))
+							PATCH_LIST* plnode = NULL;
+							if ( (plnode = (PATCH_LIST*)calloc(1, sizeof(PATCH_LIST))) )
 							{
-								if ((k + 1) * 3 < MAX_SHOWN_PATCH_SIZE && k != -1)
-								{
-									snprintf(node->originalBytes + k * 3, 4, "%.2X ", *((BYTE*)filePosition + node->patchedBytesOffset + k));
-									snprintf(node->patchedBytes + k * 3, 4, "%.2X ", *((BYTE*)vmBuffer + node->patchedBytesOffset + k));
-									k++;
-								}
-								else if (k != -1)
-								{
-									snprintf(node->originalBytes + k * 3, 4, "+");
-									snprintf(node->patchedBytes + k * 3, 4, "+");
-									k = -1;
-								}
-								node->patchedBytesCount++;
-								position++;
-							}
-							node->patchedBytesOffset += sectionHeaders->pImageSectionHeader->VirtualAddress;
-							node->next = NULL;
-							//Add node
-							patchListAddLast(&patches, node);
+								plnode->patchedbytescount = 0;
+								strcpy(plnode->modulename, modulefilename + m * MAX_PATH);
+								PathStripPathA(plnode->modulename); //Remove path for a 'better' output
+								plnode->patchedbytesoffset = position;
 
-							position += RtlCompareMemory((BYTE*)vmBuffer + position, (BYTE*)filePosition + position, sectionHeaders->pImageSectionHeader->SizeOfRawData);
-							patchesCount++;
-							k = 0;
+								while ((position <= sectionheaders->pimagesectionheader->SizeOfRawData) && (*((BYTE*)(vmbuffer)+position) != *((BYTE*)(fileposition)+position)))
+								{
+									if ((k + 1) * 3 < MAX_SHOWN_PATCH_SIZE && k != -1)
+									{
+										snprintf(plnode->originalbytes + k * 3, 4, "%.2X ", *((BYTE*)fileposition + plnode->patchedbytesoffset + k));
+										snprintf(plnode->patchedbytes + k * 3, 4, "%.2X ", *((BYTE*)vmbuffer + plnode->patchedbytesoffset + k));
+										k++;
+									}
+									else if (k != -1)
+									{
+										snprintf(plnode->originalbytes + k * 3, 4, "+");
+										snprintf(plnode->patchedbytes + k * 3, 4, "+");
+										k = -1;
+									}
+									plnode->patchedbytescount++;
+									position++;
+								}
+								plnode->patchedbytesoffset += sectionheaders->pimagesectionheader->VirtualAddress;
+								plnode->next = NULL;
+
+								patchListAddLast(&patches, plnode);
+
+								position += RtlCompareMemory((BYTE*)vmbuffer + position, (BYTE*)fileposition + position, sectionheaders->pimagesectionheader->SizeOfRawData);
+								patchescount++;
+								currentmodulepatchescount++;
+								k = 0;
+							}
+							else
+							{
 #ifdef GUI
-							SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionHeaders->pImageSectionHeader->SizeOfRawData), 0);
+								appendLogListView("[Error] Lack of memory.");
+#endif
+								free(vmbuffer);
+								vmbuffer = NULL;
+								goto free_and_quit;
+						    }
+#ifdef GUI
+							SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionheaders->pimagesectionheader->SizeOfRawData), 0); //Progressbar step
 #endif
 						}
 #ifdef GUI
-						SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionHeaders->pImageSectionHeader->SizeOfRawData), 0);
+						SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionheaders->pimagesectionheader->SizeOfRawData), 0); //Progressbar step
 #endif
 					}
-					free(vmBuffer);
-					vmBuffer = NULL;
+					else
+					{
+						appendLogListView("[Error] ReadProcessMemory issue.");
+					}
+					free(vmbuffer);
+					vmbuffer = NULL;
 				}
 			}
-			sectionHeaderListFree(&executableAndRelocSectionHeaders);
+			sectionHeaderListFree(&executableandrelocsectionheaders);
 		}
-		free(fileBuffer[m]);
-		fileBuffer[m] = NULL;
-		hModules[m] = NULL;
-
-		//Progressbar step
+		free(filebuffer[m]);
+		filebuffer[m] = NULL;
+		hmodules[m] = NULL;
 #ifdef GUI
-		SendMessage(hwndScanProgressBar02, PBM_STEPIT, 0, 0);
+		SendMessage(hwndScanProgressBar02, PBM_STEPIT, 0, 0); //Progressbar step
+		snprintf(tmpbuffer, BUFFER_SIZE, " -> patches: %d", currentmodulepatchescount);
+		concatenateLogListView(tmpbuffer, ListView_GetItemCount(hwndLogListView)-1);
 #endif
 	}
+	free(filebuffer);
+	filebuffer = NULL;
 
 #ifndef GUI
-	//Print results
 	printPatchList(patches);
 #else
-	updatePatchList(patches);
-	//Patch count log
-	RtlZeroMemory(scan_log, 128);
-	snprintf(scan_log, 128, "[Log] Patches: %d", patchesCount);
-	addLogList(scan_log);
+	updatePatchListView(patches);
+	snprintf(tmpbuffer, BUFFER_SIZE, "[Log] Total patches: %d", patchescount);
+	appendLogListView(tmpbuffer);
+#endif
+	
+free_and_quit:
+#ifdef GUI
+	SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)100, 0);
+	SendMessage(hwndScanProgressBar02, PBM_SETPOS, (WPARAM)modulescount, 0);
 #endif
 
-	//Free list
-	patchListFree(&patches);
+	if (filebuffer)
+	{
+		for (unsigned long int i = 0; filebuffer[i]; i++)
+		{
+			free(filebuffer[i]);
+			filebuffer[i] = NULL;
+		}
+		free(filebuffer);
+		filebuffer = NULL;
+	}
 
-	//Zero-out moduleFileName
-	RtlZeroMemory(moduleFileName, MAX_MODULES * MAX_PATH);
+	if (hmodules)
+	{
+		free(hmodules);
+		hmodules = NULL;
+	}
 
-	//Show execution time
+	if (modulefilename)
+	{
+		free(modulefilename);
+		modulefilename = NULL;
+	}
+
+	if (preloc)
+	{
+		free(preloc);
+		preloc = NULL;
+	}
+
+
+	if (vmbuffer)
+	{
+		free(vmbuffer);
+		vmbuffer = NULL;
+	}
+
+	if (patches)
+	{
+		patchListFree(&patches);
+	}
+
+	if (executableandrelocsectionheaders)
+	{
+		sectionHeaderListFree(&executableandrelocsectionheaders);
+	}
+
 	stop = clock();
-
 #ifndef GUI
-	fprintf(stdout, "\n\n(Execution time: %f seconds)\n", (double)(stop - start) / CLOCKS_PER_SEC);
+	fprintf(stdout, "\n\n(Execution time: %f seconds)\n", ( ((double)stop - (double)start) / CLOCKS_PER_SEC) );
 #else
-	//Execution time log
-	RtlZeroMemory(scan_log, 128);
-	snprintf(scan_log, 128, "[Log] Execution time: %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
-	addLogList(scan_log);
+	snprintf(tmpbuffer, BUFFER_SIZE, "[Log] Execution time: %f seconds", (double)(stop - start) / CLOCKS_PER_SEC);
+	appendLogListView(tmpbuffer);
 #endif
+	free(tmpbuffer);
+	tmpbuffer = NULL;
+
 	busy = 0;
 	return 0;
 }
 
 DWORD loadFromFile(char* filename, char** buffer)
 {
-	HANDLE hFile = NULL;
 	DWORD bufferSize = 0;
 	DWORD bytesRead = 0;
+	HANDLE hFile = NULL;
 
-	if ((hFile = CreateFile(filename, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)) != INVALID_HANDLE_VALUE)
+	if ( ((hFile = CreateFile(filename, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)) != INVALID_HANDLE_VALUE) )
 	{
-		if ((bufferSize = GetFileSize(hFile, NULL)) > 0)
+		if ( (bufferSize = GetFileSize(hFile, NULL)) > 0 )
 		{
-			*buffer = (char*)malloc(bufferSize);
-			if (*buffer)
+			if ( (*buffer = (char*)calloc(bufferSize, 1)) )
 			{
 				if (!ReadFile(hFile, *buffer, bufferSize, &bytesRead, NULL))
 				{
 					free(*buffer);
+					*buffer = NULL;
 				}
 			}
 		}
@@ -677,131 +811,143 @@ DWORD loadFromFile(char* filename, char** buffer)
 	return bufferSize;
 }
 
-void applyRelocation(void *fileBuffer, RELOC *pReloc, SECTION_HEADER_LIST* sectionHeaders)
+void applyRelocation(void *filebuffer, RELOC *preloc, SECTION_HEADER_LIST* sectionheaders)
 {
-	void* sectionBase = NULL;
-	void* fileBase = NULL;
-	void* endOfRelocationDir = NULL;
+	DWORD offset = 0;
+	DWORD relocationtype = 0;
+	long unsigned int relocationitems = 0;
+	void* sectionbase = NULL;
+	void* filebase = NULL;
+	void* endofrelocationdir = NULL;
 
-	fileBase = fileBuffer;
-	fileBuffer = (BYTE*)fileBuffer + virtualAddressToFileAddress(pReloc->pImageRelocationDataDirectory->VirtualAddress, sectionHeaders);
-	endOfRelocationDir = (BYTE*)fileBuffer + pReloc->pImageRelocationDataDirectory->Size;
+	filebase = filebuffer;
+	filebuffer = (BYTE*)filebuffer + virtualaddressToFileAddress(preloc->pimagerelocationdatadirectory->VirtualAddress, sectionheaders);
+	endofrelocationdir = (BYTE*)filebuffer + preloc->pimagerelocationdatadirectory->Size;
 
-	while (fileBuffer < endOfRelocationDir)
+	while (filebuffer < endofrelocationdir)
 	{
-		pReloc->pImageBaseRelocation = (PIMAGE_BASE_RELOCATION)fileBuffer;
-		size_t relocationItems = (pReloc->pImageBaseRelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD); //To determine the number of relocations in this block, subtract the size of an IMAGE_BASE_RELOCATION (8 bytes) from the value of this field, and then divide by 2 (the size of a WORD)
-		fileBuffer = (BYTE*)fileBuffer + sizeof(IMAGE_BASE_RELOCATION);
-		if (sectionBase = (void*)virtualAddressToFileAddress(pReloc->pImageBaseRelocation->VirtualAddress, sectionHeaders))
-			sectionBase = (BYTE*)sectionBase + (DWORD64)fileBase;
+		preloc->pimagebaserelocation = (PIMAGE_BASE_RELOCATION)filebuffer;
+		relocationitems = (preloc->pimagebaserelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD); //To determine the number of relocations in this block, subtract the size of an IMAGE_BASE_RELOCATION (8 bytes) from the value of this field, and then divide by 2 (the size of a WORD)
+		filebuffer = (BYTE*)filebuffer + sizeof(IMAGE_BASE_RELOCATION);
 
-		for (int i = 0; i < relocationItems; i++)
+		if (sectionbase = (void*)virtualaddressToFileAddress(preloc->pimagebaserelocation->VirtualAddress, sectionheaders))
 		{
-			if (sectionBase)
+			sectionbase = (BYTE*)sectionbase + (DWORD64)filebase;
+		}
+
+		for (unsigned long int i = 0; i < relocationitems; i++)
+		{
+			if (sectionbase)
 			{
-				DWORD offset = (*(WORD*)fileBuffer) & 0xfff; //The bottom 12 bits of each WORD are a relocation offset
-				DWORD relocationType = (*(WORD*)fileBuffer) >> 12; //The high 4 bits of each WORD are a relocation type
+				offset = (*(WORD*)filebuffer) & 0xfff; //The bottom 12 bits of each WORD are a relocation offset
+				relocationtype = (*(WORD*)filebuffer) >> 12; //The high 4 bits of each WORD are a relocation type
 				
-				if (relocationType == IMAGE_REL_BASED_HIGHLOW)
+				if (relocationtype == IMAGE_REL_BASED_HIGHLOW)
 				{
-					DWORD32 val = *(DWORD32*)((BYTE*)sectionBase + offset) + pReloc->relocationOffset;
-					memcpy((BYTE*)sectionBase + offset, &val, sizeof(val));
+					DWORD32 val = *(DWORD32*)((BYTE*)sectionbase + offset) + (DWORD32)preloc->relocationoffset;
+					memcpy((BYTE*)sectionbase + offset, &val, sizeof(val));
 				}
-				else if (relocationType == IMAGE_REL_BASED_DIR64)
+				else if (relocationtype == IMAGE_REL_BASED_DIR64)
 				{
-					DWORD64 val = *(DWORD64*)((BYTE*)sectionBase + offset) + pReloc->relocationOffset;
-					memcpy((BYTE*)sectionBase + offset, &val, sizeof(val));
+					DWORD64 val = *(DWORD64*)((BYTE*)sectionbase + offset) + (DWORD64)preloc->relocationoffset;
+					memcpy((BYTE*)sectionbase + offset, &val, sizeof(val));
 				}
-				fileBuffer = (WORD*)fileBuffer + 1;
+				filebuffer = (WORD*)filebuffer + 1;
 			}
 			else
 			{
 				//Skip block (-10ms)
-				i = relocationItems;
-				fileBuffer = (WORD*)fileBuffer + i;
+				i = relocationitems;
+				filebuffer = (WORD*)filebuffer + i;
 			}
 		}
 	}
 }
 
-DWORD64 virtualAddressToFileAddress(DWORD64 virtualAddress, SECTION_HEADER_LIST* sectionHeaders)
+DWORD64 virtualaddressToFileAddress(DWORD64 virtualaddress, SECTION_HEADER_LIST* sectionheaders)
 {
-	while (sectionHeaders)
+	while (sectionheaders)
 	{
-		if (virtualAddress >= (DWORD64)sectionHeaders->pImageSectionHeader->VirtualAddress && virtualAddress < (DWORD64)(sectionHeaders->pImageSectionHeader->SizeOfRawData + sectionHeaders->pImageSectionHeader->VirtualAddress))
+		if ( (virtualaddress >= (DWORD64)sectionheaders->pimagesectionheader->VirtualAddress) && (virtualaddress < ((DWORD64)(sectionheaders->pimagesectionheader->SizeOfRawData) + (DWORD64)(sectionheaders->pimagesectionheader->VirtualAddress))) )
 		{
-			return virtualAddress - (DWORD64)sectionHeaders->pImageSectionHeader->VirtualAddress + (DWORD64)sectionHeaders->pImageSectionHeader->PointerToRawData;
+			return ( virtualaddress - (DWORD64)sectionheaders->pimagesectionheader->VirtualAddress + (DWORD64)(sectionheaders->pimagesectionheader->PointerToRawData) );
 		}
-		sectionHeaders = sectionHeaders->next;
+		sectionheaders = sectionheaders->next;
 	}
 	return 0;
 }
 
-void sectionHeaderListAddLast(SECTION_HEADER_LIST** pSectionHeaders, SECTION_HEADER_LIST* node)
+void sectionHeaderListAddLast(SECTION_HEADER_LIST** psectionheaders, SECTION_HEADER_LIST* shlnode)
 {
-	if (pSectionHeaders)
+	SECTION_HEADER_LIST* temp = NULL;
+
+	if (psectionheaders)
 	{
-		if (*pSectionHeaders)
+		if ( (temp = *psectionheaders) )
 		{
-			SECTION_HEADER_LIST* temp = *pSectionHeaders;
 			while (temp->next)
 			{
 				temp = temp->next;
 			}
-			temp->next = node;
+			temp->next = shlnode;
 		}
 		else
 		{
-			*pSectionHeaders = node;
+			*psectionheaders = shlnode;
 		}
 	}
 }
 
-void patchListAddLast(PATCH_LIST** pPatches, PATCH_LIST* node)
+void patchListAddLast(PATCH_LIST** ppatches, PATCH_LIST* plnode)
 {
-	if (pPatches)
+	PATCH_LIST* temp = NULL;
+
+	if (ppatches)
 	{
-		if (*pPatches)
+		if ( (temp = *ppatches) )
 		{
-			PATCH_LIST* temp = *pPatches;
 			while (temp->next)
 			{
 				temp = temp->next;
 			}
-			temp->next = node;
+			temp->next = plnode;
 		}
 		else
 		{
-			*pPatches = node;
+			*ppatches = plnode;
 		}
 	}
 }
 
-void sectionHeaderListFree(SECTION_HEADER_LIST** pSectionHeaders)
+void sectionHeaderListFree(SECTION_HEADER_LIST** psectionheaders)
 {
-	if (pSectionHeaders)
+	SECTION_HEADER_LIST* temp = NULL;
+
+	if (psectionheaders)
 	{
-		SECTION_HEADER_LIST* temp = NULL;
-		while (*pSectionHeaders)
+		while (*psectionheaders)
 		{
-			temp = *pSectionHeaders;
-			*pSectionHeaders = (*pSectionHeaders)->next;
+			temp = *psectionheaders;
+			*psectionheaders = (*psectionheaders)->next;
 			free(temp);
+			temp = NULL;
 		}
 
 	}
 }
 
-void patchListFree(PATCH_LIST** pPatches)
+void patchListFree(PATCH_LIST** ppatches)
 {
-	if (pPatches)
+	PATCH_LIST* temp = NULL;
+
+	if (ppatches)
 	{
-		PATCH_LIST* temp = NULL;
-		while (*pPatches)
+		while (*ppatches)
 		{
-			temp = *pPatches;
-			*pPatches = (*pPatches)->next;
+			temp = *ppatches;
+			*ppatches = (*ppatches)->next;
 			free(temp);
+			temp = NULL;
 		}
 
 	}
@@ -810,25 +956,30 @@ void patchListFree(PATCH_LIST** pPatches)
 #ifndef GUI
 void printPatchList(PATCH_LIST* patches)
 {
-	char temp[32] = { 0 };
+	char* temp = NULL;
 
-	if (patches)
+	if ( (temp = (char*)calloc(BUFFER_SIZE, 1)) )
 	{
-		fprintf(stdout, "%-52s %-52s %s\n\n", "[Module+Offset]", "[Original bytes]", "[Patched bytes]");
-	}
-	else
-	{
-		fprintf(stdout, "No patches were found\n");
-	}
+		if (patches)
+		{
+			fprintf(stdout, "%-52s %-52s %s\n\n", "[Module+Offset]", "[Original bytes]", "[Patched bytes]");
+		}
+		else
+		{
+			fprintf(stdout, "No patches were found\n");
+		}
 
-	while (patches)
-	{
-		_itoa(patches->patchedBytesOffset, temp, 16);
-		_strupr(temp);
-		strcat(patches->moduleName, "+");
-		strcat(patches->moduleName, temp);
-		fprintf(stdout, "%-52s %-52s %s\n", patches->moduleName, patches->originalBytes, patches->patchedBytes);
-		patches = patches->next;
+		while (patches)
+		{
+			_ui64toa(patches->patchedbytesoffset, temp, 16);
+			_strupr(temp);
+			strcat(patches->modulename, "+");
+			strcat(patches->modulename, temp);
+			fprintf(stdout, "%-52s %-52s %s\n", patches->modulename, patches->originalbytes, patches->patchedbytes);
+			patches = patches->next;
+		}
+		free(temp);
+		temp = NULL;
 	}
 }
 #endif
