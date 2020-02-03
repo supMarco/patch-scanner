@@ -525,7 +525,7 @@ int main()
 			strcat(tmpbuffer, modulefilename+ m*MAX_PATH);
 			strcat(tmpbuffer, ": couldn't load this file.");
 			appendLogListView(tmpbuffer);		
-			filebuffer[m] = hmodules[m] = MODULE_PLACEHOLDER;
+			filebuffer[m] = hmodules[m] = (void*)MODULE_PLACEHOLDER;
 			notloadedmodulescount++;
 			continue;
 #endif
