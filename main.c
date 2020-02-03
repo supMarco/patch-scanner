@@ -219,7 +219,7 @@ void onWindowCreate(HWND hwnd)
 	lvc.cx = 300;
 	ListView_InsertColumn(hwndProcessListView, 0, &lvc);
 	lvc.iSubItem = 0;
-	lvc.pszText = "pid";
+	lvc.pszText = "PID";
 	lvc.cx = 100;
 	ListView_InsertColumn(hwndProcessListView, 0, &lvc);
 
@@ -446,6 +446,7 @@ int main()
 	unsigned long int currentmodulepatchescount = 0;
 	unsigned long int modulescount = 0;
 	unsigned long int notloadedmodulescount = 0;
+	unsigned long int currentlybeingscannedmodulelwindex = 0;
 	PIMAGE_DOS_HEADER pimagedosheader = NULL;
 	PIMAGE_FILE_HEADER pimagefileheader = NULL;
 	PIMAGE_SECTION_HEADER pimagesectionheader = NULL;
@@ -557,14 +558,13 @@ int main()
 			continue;
 		}
 
-		currentmodulepatchescount = 0;
-
 #ifdef GUI
 		PathStripPathA(modulefilename + m * MAX_PATH);
 		snprintf(tmpbuffer, BUFFER_SIZE, "[Log] Scanning: %s", modulefilename + m * MAX_PATH);
 		appendLogListView(tmpbuffer);
 #endif
-
+		currentlybeingscannedmodulelwindex = ListView_GetItemCount(hwndLogListView) - 1;
+		currentmodulepatchescount = 0;
 		fileposition = filebuffer[m];
 		pimagedosheader = (PIMAGE_DOS_HEADER)fileposition;
 
@@ -689,6 +689,8 @@ int main()
 						}
 #ifdef GUI
 						SendMessage(hwndScanProgressBar01, PBM_SETPOS, (WPARAM)((long long unsigned int)position * 100 / sectionheaders->pimagesectionheader->SizeOfRawData), 0); //Progressbar step
+						snprintf(tmpbuffer, BUFFER_SIZE, " -> patches: %d", currentmodulepatchescount);
+						concatenateLogListView(tmpbuffer, currentlybeingscannedmodulelwindex);
 #endif
 					}
 					else
@@ -706,8 +708,6 @@ int main()
 		hmodules[m] = NULL;
 #ifdef GUI
 		SendMessage(hwndScanProgressBar02, PBM_STEPIT, 0, 0); //Progressbar step
-		snprintf(tmpbuffer, BUFFER_SIZE, " -> patches: %d", currentmodulepatchescount);
-		concatenateLogListView(tmpbuffer, ListView_GetItemCount(hwndLogListView)-1);
 #endif
 	}
 	free(filebuffer);
